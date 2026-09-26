@@ -1,96 +1,127 @@
---// =========================================================
---// RAINE MINING HUB
---// =========================================================
-
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
-local VirtualUser = game:GetService("VirtualUser")
-
-local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+end)
 
 
 --// =========================================================
---// SETTINGS
+--// ANTI AFK - HYBRID
 --// =========================================================
 
-local BOULDER_REFRESH_TIME = 3
-local BOULDER_HEIGHT_OFFSET = 10
+local ANTI_AFK_INTERVAL = 45
 
-local FLY_SPEED = 70
+local function antiAfkPulse()
 
-local MINING_INTERVAL = 0.12
-local FORWARD_DISTANCE = 7
+	local camera = workspace.CurrentCamera
 
--- Brutal Farm: tidak ada delay antar arah dalam satu burst.
--- BRUTAL_INTERVAL adalah jeda antar burst supaya client/server tidak langsung freeze.
-local BRUTAL_INTERVAL = 0.06
-local BRUTAL_RADIUS = 8
-local BRUTAL_VERTICAL = 6
+	-- VirtualUser pulse
+	pcall(function()
 
-local WALK_SPEED = 16
+		VirtualUser:CaptureController()
 
-local MINING_DIRECTIONS = {
-	["Atas"] = 2,
-	["Tengah"] = 0,
-	["Bawah"] = -2
-}
+		VirtualUser:Button2Down(
+			Vector2.new(0, 0),
+			camera and camera.CFrame or CFrame.new()
+		)
 
+		task.wait(0.1)
 
---// =========================================================
---// STATES
---// =========================================================
+		VirtualUser:Button2Up(
+			Vector2.new(0, 0),
+			camera and camera.CFrame or CFrame.new()
+		)
 
-local flyEnabled = false
-local autoMiningEnabled = false
-local brutalFarmEnabled = false
-
-local miningDirection = "Tengah"
-
-local savedPosition = nil
-
-local flyConnection = nil
-local bodyVelocity = nil
-local bodyGyro = nil
-
-local minimized = false
+	end)
 
 
---// =========================================================
---// REMOTES
---// =========================================================
+	-- Humanoid activity pulse
+	-- Sangat kecil supaya tidak mengganggu posisi farming
+	local humanoid = getHumanoid()
 
-local requestSell = ReplicatedStorage
-	:WaitForChild("GemRemotes")
-	:WaitForChild("RequestSell")
+	if humanoid then
 
-local digRequest = ReplicatedStorage
-	:WaitForChild("DigRemotes")
-	:WaitForChild("DigRequest")
+		pcall(function()
 
+			humanoid:Move(
+				Vector3.new(0.01, 0, 0),
+				false
+			)
 
---// =========================================================
---// REMOVE OLD GUI
---// =========================================================
+			task.wait(0.1)
 
-local oldGUI = playerGui:FindFirstChild("RaineMiningHub")
+			humanoid:Move(
+				Vector3.zero,
+				false
+			)
 
-if oldGUI then
-	oldGUI:Destroy()
+		end)
+
+	end
+
 end
 
 
+-- Backup kalau Roblox mendeteksi Idled
+player.Idled:Connect(function()
+
+	antiAfkPulse()
+
+end)
+
+
+-- Jangan tunggu Idled:
+-- pulse rutin setiap 45 detik
+task.spawn(function()
+
+	while true do
+
+		task.wait(ANTI_AFK_INTERVAL)
+
+		antiAfkPulse()
+
+	end
+
+end)
+
 --// =========================================================
---// COLORS
+--// RESPAWN
 --// =========================================================
 
-local COLORS = {
+player.CharacterAdded:
+	Connect(function()
 
-	Main = Color3.fromRGB(14, 15, 20),
+		if flyEnabled then
 
-	Sidebar = Color3.fromRGB(18, 19, 25),
+			flyToggle:Set(false)
 
-	Card = Color3.fromRGB(23, 25, 32),
+			stopFly()
+
+		end
+
+	end)
+
+
+--// =========================================================
+--// START PAGE
+--// =========================================================
+
+
+
+--// =========================================================
+--// WALK SPEED RESPAWN RESTORE
+--// =========================================================
+
+player.CharacterAdded:
+	Connect(function(character)
+
+		local humanoid =
+			character:WaitForChild(
+				"Humanoid",
+				10
+			)
+
+		if humanoid then
+
+			humanoid.WalkSpeed =
+				WALK_SPEED
+
+		end
+
+	end)
