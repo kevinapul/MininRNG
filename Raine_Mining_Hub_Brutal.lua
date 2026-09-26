@@ -22,7 +22,6 @@ local BOULDER_HEIGHT_OFFSET = 10
 
 local FLY_SPEED = 70
 
-local MINING_INTERVAL = 0.12
 local FORWARD_DISTANCE = 7
 
 local MINING_DIRECTIONS = {
@@ -1571,7 +1570,7 @@ local miningToggle =
 
 		"Auto Mining",
 
-		"Fire DigRequest setiap frame (no delay)",
+		"Fire DigRequest otomatis setiap frame (Heartbeat)",
 
 		UDim2.fromOffset(
 			16,
@@ -2017,52 +2016,76 @@ local flyCard =
 			1,
 			-32,
 			0,
-			75
+			92
 		)
 
 	)
 
 
-local flyInfo =
-	Instance.new("TextLabel")
+local flySpeedLabel = Instance.new("TextLabel")
+flySpeedLabel.Position = UDim2.fromOffset(15, 11)
+flySpeedLabel.Size = UDim2.new(0.55, 0, 0, 22)
+flySpeedLabel.BackgroundTransparency = 1
+flySpeedLabel.Text = "Fly Speed"
+flySpeedLabel.TextColor3 = COLORS.Text
+flySpeedLabel.TextSize = 14
+flySpeedLabel.Font = Enum.Font.GothamSemibold
+flySpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+flySpeedLabel.Parent = flyCard
 
-flyInfo.Position =
-	UDim2.fromOffset(
-		15,
-		10
-	)
+local flySpeedDesc = Instance.new("TextLabel")
+flySpeedDesc.Position = UDim2.fromOffset(15, 37)
+flySpeedDesc.Size = UDim2.new(0.55, 0, 0, 18)
+flySpeedDesc.BackgroundTransparency = 1
+flySpeedDesc.Text = "Input speed sendiri • apply langsung"
+flySpeedDesc.TextColor3 = COLORS.SubText
+flySpeedDesc.TextSize = 10
+flySpeedDesc.Font = Enum.Font.Gotham
+flySpeedDesc.TextXAlignment = Enum.TextXAlignment.Left
+flySpeedDesc.Parent = flyCard
 
-flyInfo.Size =
-	UDim2.new(
-		1,
-		-30,
-		1,
-		-20
-	)
+local flySpeedUnit = Instance.new("TextLabel")
+flySpeedUnit.Position = UDim2.fromOffset(15, 59)
+flySpeedUnit.Size = UDim2.new(0.55, 0, 0, 16)
+flySpeedUnit.BackgroundTransparency = 1
+flySpeedUnit.Text = "studs/sec"
+flySpeedUnit.TextColor3 = COLORS.SubText
+flySpeedUnit.TextSize = 10
+flySpeedUnit.Font = Enum.Font.Gotham
+flySpeedUnit.TextXAlignment = Enum.TextXAlignment.Left
+flySpeedUnit.Parent = flyCard
 
-flyInfo.BackgroundTransparency = 1
+local flySpeedBox = Instance.new("TextBox")
+flySpeedBox.AnchorPoint = Vector2.new(1, 0.5)
+flySpeedBox.Position = UDim2.new(1, -14, 0.5, 0)
+flySpeedBox.Size = UDim2.fromOffset(125, 42)
+flySpeedBox.BackgroundColor3 = COLORS.Input
+flySpeedBox.BorderSizePixel = 0
+flySpeedBox.Text = tostring(FLY_SPEED)
+flySpeedBox.PlaceholderText = "70"
+flySpeedBox.ClearTextOnFocus = false
+flySpeedBox.TextColor3 = COLORS.Text
+flySpeedBox.PlaceholderColor3 = COLORS.SubText
+flySpeedBox.TextSize = 14
+flySpeedBox.Font = Enum.Font.GothamSemibold
+flySpeedBox.Parent = flyCard
+addCorner(flySpeedBox, 8)
+addStroke(flySpeedBox, 0.55)
 
-flyInfo.Text =
-	"Fly Speed\n"
-	.. tostring(FLY_SPEED)
-	.. " studs/sec"
+local function applyFlySpeed()
+	local value = tonumber(flySpeedBox.Text)
 
-flyInfo.TextColor3 =
-	COLORS.SubText
+	if value and value > 0 then
+		FLY_SPEED = math.clamp(value, 1, 5000)
+		flySpeedBox.Text = tostring(FLY_SPEED)
+	else
+		flySpeedBox.Text = tostring(FLY_SPEED)
+	end
+end
 
-flyInfo.TextSize = 12
-
-flyInfo.Font =
-	Enum.Font.GothamMedium
-
-flyInfo.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-flyInfo.TextYAlignment =
-	Enum.TextYAlignment.Top
-
-flyInfo.Parent =
-	flyCard
+flySpeedBox.FocusLost:Connect(function()
+	applyFlySpeed()
+end)
 
 
 --// =========================================================
@@ -2076,13 +2099,39 @@ createHeader(
 )
 
 
+-- Passive Boulder Logger embedded ke tab Boulders
+local boulderLoggerCard =
+	createCard(
+		boulderPage,
+		UDim2.fromOffset(24, 75),
+		UDim2.new(1, -48, 0, 100)
+	)
+
+local boulderLoggerInfo = Instance.new("TextLabel")
+boulderLoggerInfo.Position = UDim2.fromOffset(14, 10)
+boulderLoggerInfo.Size = UDim2.new(1, -28, 1, -20)
+boulderLoggerInfo.BackgroundTransparency = 1
+boulderLoggerInfo.Text =
+	"Ever seen : 0\n" ..
+	"Current   : 0\n" ..
+	"Hidden    : 0\n" ..
+	"Revealed  : 0\n" ..
+	"Nearest   : None (-)"
+boulderLoggerInfo.TextColor3 = COLORS.SubText
+boulderLoggerInfo.TextSize = 10
+boulderLoggerInfo.Font = Enum.Font.Code
+boulderLoggerInfo.TextXAlignment = Enum.TextXAlignment.Left
+boulderLoggerInfo.TextYAlignment = Enum.TextYAlignment.Top
+boulderLoggerInfo.Parent = boulderLoggerCard
+
+
 local boulderStatus =
 	Instance.new("TextLabel")
 
 boulderStatus.Position =
 	UDim2.fromOffset(
 		24,
-		76
+		184
 	)
 
 boulderStatus.Size =
@@ -2119,7 +2168,7 @@ local boulderScroll =
 boulderScroll.Position =
 	UDim2.fromOffset(
 		24,
-		105
+		213
 	)
 
 boulderScroll.Size =
@@ -2127,7 +2176,7 @@ boulderScroll.Size =
 		1,
 		-48,
 		1,
-		-125
+		-228
 	)
 
 boulderScroll.BackgroundColor3 =
@@ -2207,6 +2256,143 @@ boulderPadding.PaddingRight =
 
 boulderPadding.Parent =
 	boulderScroll
+
+
+--// =========================================================
+--// PASSIVE BOULDER LOGGER
+--// =========================================================
+
+local passiveSeen = {}
+local passiveSeenCount = 0
+local passiveLastDistance = "-"
+
+local function getPassiveBoulderPosition(obj)
+	if obj:IsA("Model") then
+		local mesh = obj:FindFirstChild("Mesh_0", true)
+
+		if mesh and mesh:IsA("BasePart") then
+			return mesh.Position
+		end
+
+		local ok, cf = pcall(function()
+			return obj:GetPivot()
+		end)
+
+		if ok and cf then
+			return cf.Position
+		end
+
+	elseif obj:IsA("BasePart") then
+		return obj.Position
+	end
+
+	return nil
+end
+
+local function passiveUniqueKey(obj)
+	local id = obj:GetAttribute("BoulderId")
+
+	if id ~= nil then
+		return tostring(id)
+	end
+
+	local pos = getPassiveBoulderPosition(obj)
+
+	if pos then
+		return string.format(
+			"%s_%.0f_%.0f_%.0f",
+			obj.Name,
+			pos.X,
+			pos.Y,
+			pos.Z
+		)
+	end
+
+	return obj.Name .. "_" .. tostring(obj)
+end
+
+local function rememberPassiveBoulder(obj)
+	local key = passiveUniqueKey(obj)
+
+	if not passiveSeen[key] then
+		passiveSeen[key] = {
+			name = obj.Name,
+			pos = getPassiveBoulderPosition(obj)
+		}
+
+		passiveSeenCount += 1
+	end
+end
+
+local passiveBoulderFolder = workspace:WaitForChild("Boulders")
+
+for _, obj in ipairs(passiveBoulderFolder:GetChildren()) do
+	rememberPassiveBoulder(obj)
+end
+
+passiveBoulderFolder.ChildAdded:Connect(function(obj)
+	task.wait(0.1)
+	rememberPassiveBoulder(obj)
+end)
+
+local function updatePassiveBoulderLogger()
+	if not boulderLoggerInfo or not boulderLoggerInfo.Parent then
+		return
+	end
+
+	local current = passiveBoulderFolder:GetChildren()
+	local hidden = 0
+	local revealed = 0
+
+	for _, obj in ipairs(current) do
+		if obj:GetAttribute("Revealed") == true then
+			revealed += 1
+		else
+			hidden += 1
+		end
+	end
+
+	local char = player.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+
+	local nearestName = "None"
+	local nearestDist = math.huge
+
+	if root then
+		for _, obj in ipairs(current) do
+			local pos = getPassiveBoulderPosition(obj)
+
+			if pos then
+				local dist = (pos - root.Position).Magnitude
+
+				if dist < nearestDist then
+					nearestDist = dist
+					nearestName = obj.Name
+				end
+			end
+		end
+	end
+
+	if nearestDist < math.huge then
+		passiveLastDistance = math.floor(nearestDist + 0.5) .. " studs"
+	else
+		passiveLastDistance = "-"
+	end
+
+	boulderLoggerInfo.Text =
+		"Ever seen : " .. passiveSeenCount ..
+		"\nCurrent   : " .. #current ..
+		"\nHidden    : " .. hidden ..
+		"\nRevealed  : " .. revealed ..
+		"\nNearest   : " .. nearestName .. " (" .. passiveLastDistance .. ")"
+end
+
+task.spawn(function()
+	while gui.Parent do
+		updatePassiveBoulderLogger()
+		task.wait(0.5)
+	end
+end)
 
 
 --// =========================================================
@@ -2778,17 +2964,17 @@ miningToggle.OnChanged =
 	end
 
 
-local miningConnection =
-	RunService.Heartbeat:
-		Connect(function()
+-- Fast mining: satu DigRequest setiap Heartbeat/frame.
+-- Kecepatan efektif tetap bisa dibatasi oleh server game.
+RunService.Heartbeat:Connect(function()
 
-			if autoMiningEnabled then
+	if autoMiningEnabled then
 
-				digInFront()
+		digInFront()
 
-			end
+	end
 
-		end)
+end)
 
 
 --// =========================================================
