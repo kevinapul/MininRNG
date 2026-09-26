@@ -25,12 +25,6 @@ local FLY_SPEED = 70
 local MINING_INTERVAL = 0.12
 local FORWARD_DISTANCE = 7
 
--- Extra controls
-local BRUTAL_INTERVAL = 0.08
-local BRUTAL_RADIUS = 7
-local BRUTAL_VERTICAL = 6
-local WALK_SPEED = 16
-
 local MINING_DIRECTIONS = {
 	["Atas"] = 2,
 	["Tengah"] = 0,
@@ -44,7 +38,6 @@ local MINING_DIRECTIONS = {
 
 local flyEnabled = false
 local autoMiningEnabled = false
-local brutalFarmEnabled = false
 
 local miningDirection = "Tengah"
 
@@ -1578,28 +1571,11 @@ local miningToggle =
 
 		"Auto Mining",
 
-		"Fire DigRequest otomatis setiap 0.12 detik",
+		"Fire DigRequest setiap frame (no delay)",
 
 		UDim2.fromOffset(
 			16,
 			85
-		)
-
-	)
-
-
-local brutalFarmToggle =
-	createToggle(
-
-		miningPage,
-
-		"Brutal Farm",
-
-		"Dig cepat 6 arah di sekitar karakter",
-
-		UDim2.fromOffset(
-			16,
-			160
 		)
 
 	)
@@ -1616,7 +1592,7 @@ local directionCard =
 
 		UDim2.fromOffset(
 			16,
-			235
+			165
 		),
 
 		UDim2.new(
@@ -1944,7 +1920,7 @@ local miningInfo =
 
 		UDim2.fromOffset(
 			16,
-			320
+			255
 		),
 
 		UDim2.new(
@@ -2087,214 +2063,6 @@ flyInfo.TextYAlignment =
 
 flyInfo.Parent =
 	flyCard
-
-
---// =========================================================
---// WALK SPEED
---// =========================================================
-
-local walkCard =
-	createCard(
-
-		movementPage,
-
-		UDim2.fromOffset(
-			16,
-			255
-		),
-
-		UDim2.new(
-			1,
-			-32,
-			0,
-			95
-		)
-
-	)
-
-
-local walkLabel =
-	Instance.new("TextLabel")
-
-walkLabel.Position =
-	UDim2.fromOffset(
-		15,
-		10
-	)
-
-walkLabel.Size =
-	UDim2.new(
-		0.5,
-		0,
-		0,
-		22
-	)
-
-walkLabel.BackgroundTransparency = 1
-walkLabel.Text = "Walk Speed"
-walkLabel.TextColor3 = COLORS.Text
-walkLabel.TextSize = 14
-walkLabel.Font = Enum.Font.GothamSemibold
-walkLabel.TextXAlignment = Enum.TextXAlignment.Left
-walkLabel.Parent = walkCard
-
-
-local speedBox =
-	Instance.new("TextBox")
-
-speedBox.AnchorPoint =
-	Vector2.new(
-		1,
-		0
-	)
-
-speedBox.Position =
-	UDim2.new(
-		1,
-		-14,
-		0,
-		10
-	)
-
-speedBox.Size =
-	UDim2.fromOffset(
-		110,
-		34
-	)
-
-speedBox.BackgroundColor3 = COLORS.Input
-speedBox.BorderSizePixel = 0
-speedBox.Text = tostring(WALK_SPEED)
-speedBox.PlaceholderText = "16"
-speedBox.ClearTextOnFocus = false
-speedBox.TextColor3 = COLORS.Text
-speedBox.TextSize = 13
-speedBox.Font = Enum.Font.GothamMedium
-speedBox.Parent = walkCard
-
-addCorner(
-	speedBox,
-	8
-)
-
-
-local walkStatus =
-	Instance.new("TextLabel")
-
-walkStatus.Position =
-	UDim2.fromOffset(
-		15,
-		47
-	)
-
-walkStatus.Size =
-	UDim2.new(
-		0.55,
-		0,
-		0,
-		30
-	)
-
-walkStatus.BackgroundTransparency = 1
-walkStatus.Text = "Current: " .. tostring(WALK_SPEED)
-walkStatus.TextColor3 = COLORS.SubText
-walkStatus.TextSize = 11
-walkStatus.Font = Enum.Font.Gotham
-walkStatus.TextXAlignment = Enum.TextXAlignment.Left
-walkStatus.Parent = walkCard
-
-
-local applySpeedButton =
-	createActionButton(
-
-		walkCard,
-
-		"Apply",
-
-		UDim2.new(
-			1,
-			-124,
-			0,
-			52
-		),
-
-		UDim2.fromOffset(
-			110,
-			30
-		)
-
-	)
-
-
-local function applyWalkSpeed()
-
-	local value =
-		tonumber(
-			speedBox.Text
-		)
-
-	if not value then
-
-		speedBox.Text =
-			tostring(
-				WALK_SPEED
-			)
-
-		return
-
-	end
-
-	value =
-		math.clamp(
-			value,
-			1,
-			300
-		)
-
-	WALK_SPEED = value
-
-	speedBox.Text =
-		tostring(
-			WALK_SPEED
-		)
-
-	local humanoid =
-		getHumanoid()
-
-	if humanoid then
-
-		humanoid.WalkSpeed =
-			WALK_SPEED
-
-	end
-
-	walkStatus.Text =
-		"Current: "
-		.. tostring(
-			WALK_SPEED
-		)
-
-end
-
-
-applySpeedButton.MouseButton1Click:
-	Connect(function()
-
-		applyWalkSpeed()
-
-	end)
-
-
-speedBox.FocusLost:
-	Connect(function(enterPressed)
-
-		if enterPressed then
-
-			applyWalkSpeed()
-
-		end
-
-	end)
 
 
 --// =========================================================
@@ -3010,209 +2778,17 @@ miningToggle.OnChanged =
 	end
 
 
-task.spawn(function()
+local miningConnection =
+	RunService.Heartbeat:
+		Connect(function()
 
-	while true do
+			if autoMiningEnabled then
 
-		if autoMiningEnabled then
+				digInFront()
 
-			digInFront()
-
-		end
-
-
-		task.wait(
-			MINING_INTERVAL
-		)
-
-	end
-
-end)
-
-
---// =========================================================
---// BRUTAL FARM
---// =========================================================
-
-local function fireDigAt(
-	position
-)
-
-	local digPosition =
-		createDigVector(
-
-			position.X,
-			position.Y,
-			position.Z
-
-		)
-
-
-	digRequest:FireServer(
-		digPosition
-	)
-
-end
-
-
-local function brutalFarmBurst()
-
-	local root =
-		getRoot()
-
-	if not root then
-		return
-	end
-
-
-	local look =
-		root.CFrame.LookVector
-
-	local rightLook =
-		root.CFrame.RightVector
-
-
-	local forward =
-		Vector3.new(
-			look.X,
-			0,
-			look.Z
-		)
-
-	local right =
-		Vector3.new(
-			rightLook.X,
-			0,
-			rightLook.Z
-		)
-
-
-	if forward.Magnitude < 0.01 then
-
-		forward =
-			Vector3.new(
-				0,
-				0,
-				-1
-			)
-
-	else
-
-		forward =
-			forward.Unit
-
-	end
-
-
-	if right.Magnitude < 0.01 then
-
-		right =
-			Vector3.new(
-				1,
-				0,
-				0
-			)
-
-	else
-
-		right =
-			right.Unit
-
-	end
-
-
-	local center =
-		root.Position
-
-
-	local targets = {
-
-		center
-			+ (
-				forward
-				* BRUTAL_RADIUS
-			),
-
-		center
-			- (
-				forward
-				* BRUTAL_RADIUS
-			),
-
-		center
-			+ (
-				right
-				* BRUTAL_RADIUS
-			),
-
-		center
-			- (
-				right
-				* BRUTAL_RADIUS
-			),
-
-		center
-			+ Vector3.new(
-				0,
-				BRUTAL_VERTICAL,
-				0
-			),
-
-		center
-			- Vector3.new(
-				0,
-				BRUTAL_VERTICAL,
-				0
-			)
-
-	}
-
-
-	for _, target
-		in ipairs(
-			targets
-		) do
-
-		pcall(function()
-
-			fireDigAt(
-				target
-			)
+			end
 
 		end)
-
-	end
-
-end
-
-
-brutalFarmToggle.OnChanged =
-	function(enabled)
-
-		brutalFarmEnabled =
-			enabled
-
-	end
-
-
-task.spawn(function()
-
-	while true do
-
-		if brutalFarmEnabled then
-
-			brutalFarmBurst()
-
-		end
-
-
-		task.wait(
-			BRUTAL_INTERVAL
-		)
-
-	end
-
-end)
 
 
 --// =========================================================
@@ -3749,30 +3325,5 @@ player.CharacterAdded:
 --// =========================================================
 --// START PAGE
 --// =========================================================
-
-
-
---// =========================================================
---// WALK SPEED RESPAWN RESTORE
---// =========================================================
-
-player.CharacterAdded:
-	Connect(function(character)
-
-		local humanoid =
-			character:WaitForChild(
-				"Humanoid",
-				10
-			)
-
-		if humanoid then
-
-			humanoid.WalkSpeed =
-				WALK_SPEED
-
-		end
-
-	end)
-
 
 switchPage("Home")
