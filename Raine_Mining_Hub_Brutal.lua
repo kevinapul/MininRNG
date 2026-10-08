@@ -3692,9 +3692,9 @@ task.spawn(function()
 --// Local scope: avoids original 200-local-register compiler limit.
 local page = createPage("Explorer")
 createTab("Explorer", "⛏", 6)
-createHeader(page, "Mountain Explorer V5", "Edge-aware sweep + crystal + altitude progression")
+createHeader(page, "Mountain Explorer V6", "Edge-aware sweep, nearby E, habitat altitude, RNG recovery")
 
-local enable = createToggle(page, "Adaptive Mountain Farm", "Sweep terrain, collect nearby, climb layers", UDim2.fromOffset(16, 74))
+local enable = createToggle(page, "Adaptive Mountain Farm", "Sweep + collect while moving; stop climbing at habitat", UDim2.fromOffset(16, 74))
 local settings = createCard(page, UDim2.fromOffset(16, 151), UDim2.new(1,-32,0,126))
 local speed = 32
 local directionRadius = 8
@@ -3702,8 +3702,12 @@ local EDGE_CONFIRM_SECONDS = 1.2
 local EDGE_RECHECK_INTERVAL = 0.35
 local SURFACE_SCAN_RANGE = 32
 local SEARCH_STEP_SECONDS = 1.3
-local layerHeight = 65
-local targetTop = 2000 -- approximate target RELATIVE to mountain entrance, not world Y
+local layerHeight = 160
+local targetTop = 2000 -- desired HABITAT altitude RELATIVE to mountain entry (studs)
+local HABITAT_BAND = 45 -- once arrived, stay near this height unless surface is absent
+local COLLECT_INTERVAL = 0.85 -- throttle E presses to max one per 0.85 sec
+local COLLECT_SCAN_INTERVAL = 0.8
+local RETURN_TIMEOUT = 45
 local minHeight = 100
 local knownBase, knownMountain = nil, nil
 local session = {enabled=false, phase="IDLE", layer=0, heading=Vector3.new(1,0,0), sweepStart=0,
@@ -3711,7 +3715,8 @@ local session = {enabled=false, phase="IDLE", layer=0, heading=Vector3.new(1,0,0
     lastSector=nil, sectors={}, queue={}, seen={}, progress=0, emptyAt=0, lastRock=0, layerSince=0,
     lootTarget=nil, lootSince=0, lastE=0, lastBoulderScan=0, boulder=nil, activeSince=0,
     edgeSince=nil, edgeLastScan=0, edgeFound=false, edgeHeading=nil, lastValid=nil, lastValidAt=0,
-    recoverySince=0, scanMode="", emptyStreak=0}
+    recoverySince=0, scanMode="", emptyStreak=0, baseLatched=false, returnSince=0,
+    lootScanAt=0, lootLast=nil, lootLastAt=0, habitatReached=false, lastRootPos=nil}
 
 local function mkLabel(parent, txt, pos, size, fs)
     local o=Instance.new("TextLabel")
@@ -3752,12 +3757,12 @@ UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then sliding=false end
 end)
 
-local reachText=mkLabel(settings,"Target height above mountain entrance (studs):",UDim2.fromOffset(14,65),UDim2.new(1,-28,0,18),11)
+local reachText=mkLabel(settings,"Habitat height above mountain entry (studs):",UDim2.fromOffset(14,65),UDim2.new(1,-28,0,18),11)
 local topBox=Instance.new("TextBox")
 topBox.Position=UDim2.fromOffset(14,88);topBox.Size=UDim2.fromOffset(134,29)
 topBox.BackgroundColor3=COLORS.Input;topBox.TextColor3=COLORS.Text;topBox.TextSize=12
 topBox.ClearTextOnFocus=false;topBox.Text="2000";topBox.Parent=settings;addCorner(topBox,7)
-local heightHint=mkLabel(settings,"2000 default • set per RNG mountain",UDim2.fromOffset(159,88),UDim2.new(1,-170,0,29),10)
+local heightHint=mkLabel(settings,"Stop climbing here • 2000 default",UDim2.fromOffset(159,88),UDim2.new(1,-170,0,29),10)
 topBox.FocusLost:Connect(function()
     targetTop=math.clamp(tonumber(topBox.Text) or targetTop,100,30000)
     topBox.Text=tostring(math.floor(targetTop))
@@ -3771,10 +3776,10 @@ local function updateMarks()
     marks.Text="Base: "..(knownBase and "saved" or "unset").."   Mountain: "..(knownMountain and "saved" or "unset")
 end
 setBase.MouseButton1Click:Connect(function()
-    local r=readRoot();if r then knownBase=r.Position;updateMarks() end
+    local r=readRoot();if r then knownBase=r.Position; session.baseLatched=false;updateMarks() end
 end)
 setMountain.MouseButton1Click:Connect(function()
-    local r=readRoot();if r then knownMountain=r.Position; updateMarks() end
+    local r=readRoot();if r then knownMountain=r.Position; session.sectors={};session.layer=0;session.lastValid=nil; updateMarks() end
 end)
 
 -- Compact status for the 440px-wide hub. The page becomes scrollable via its child status panel.
@@ -3913,26 +3918,31 @@ local function crystalPart(inst)
     if inst:IsA("Model") then return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart",true) end
 end
 local function nearestCollectible(root)
-    local best=nil;local bestDist=13;local seen={}
-    local currentTime=os.clock()
-    for _,inst in ipairs(workspace:GetDescendants()) do
-        if crystalCandidate(inst) then
-            local part=crystalPart(inst)
-            if part and not seen[part] and not part:IsDescendantOf(player.Character) and (session.seen[part] or 0)<currentTime then
-                seen[part]=true
-                local dist=(part.Position-root.Position).Magnitude
-                -- Only nearby loot; ignore distant/display crystals (including base showcases).
-                if dist<bestDist and (not knownBase or (part.Position-knownBase).Magnitude>90) then
-                    local cast=terrainCast(root.Position,part.Position-root.Position)
-                    if not cast or cast.Instance==part or cast.Instance:IsDescendantOf(part.Parent) then
-                        best=part;bestDist=dist
-                    end
+    -- Spatial query avoids scanning the ENTIRE workspace every 0.8s.
+    local best, bestDist = nil, 11
+    local now=os.clock()
+    local params=OverlapParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances={player.Character}
+    params.MaxParts=250
+    for _,part in ipairs(workspace:GetPartBoundsInRadius(root.Position, 13, params)) do
+        local model=part:FindFirstAncestorOfClass("Model")
+        local prompt=part:FindFirstChildWhichIsA("ProximityPrompt",true)
+        if not prompt and model then prompt=model:FindFirstChildWhichIsA("ProximityPrompt",true) end
+        if crystalCandidate(part) or (model and crystalCandidate(model)) or (prompt and crystalCandidate(prompt)) then
+            local dist=(part.Position-root.Position).Magnitude
+            if dist<bestDist and (session.seen[part] or 0)<now and
+               (not knownBase or (part.Position-knownBase).Magnitude>90) then
+                local ray=terrainCast(root.Position,part.Position-root.Position)
+                if not ray or ray.Instance==part or ray.Instance:IsDescendantOf(model or part) then
+                    best,bestDist=part,dist
                 end
             end
         end
     end
     return best
 end
+
 local function collectE(root,part)
     if not part or not part.Parent then return end
     local prompt=part:FindFirstChildWhichIsA("ProximityPrompt",true)
@@ -3965,10 +3975,14 @@ local function resetSector(now,root)
     session.edgeSince=nil
 end
 local function advanceLayer(now,root)
-    session.layer+=1
-    local maxLayers=math.max(1,math.floor(targetTop/layerHeight))
-    if session.layer>maxLayers then session.layer=math.max(1,math.floor(maxLayers*.45)) end
-    session.sectors={}
+    -- Travel toward the chosen habitat only. Do not endlessly climb after arrival.
+    local maxLayers=math.max(1,math.ceil(targetTop/layerHeight))
+    if session.layer<maxLayers then
+        session.layer+=1
+    else
+        session.habitatReached=true
+    end
+    -- Retain sector history while circling habitat; do not erase explored sectors.
     session.layerSince=now
     session.turnCount+=1
     session.heading=Vector3.new(math.cos(session.turnCount*1.57),0,math.sin(session.turnCount*1.57))
@@ -3994,7 +4008,7 @@ local function activate(v)
     session.enabled=v
     if v then
         session.phase="EXPLORE"
-        session.layer=0;session.sectors={};session.lootTarget=nil
+        session.layer=0;session.sectors={};session.lootTarget=nil;session.baseLatched=false;session.habitatReached=false
         session.edgeSince=nil;session.edgeLastScan=0;session.edgeFound=false
         session.lastValid=nil;session.lastValidAt=0;session.recoverySince=0
         session.lastScan=0;session.lastCollect=0;session.lastRock=os.clock()
@@ -4016,13 +4030,32 @@ RunService.Heartbeat:Connect(function(dt)
     if not root then cleanup();return end
     if flyEnabled then enable:Set(false);activate(false);return end
     local now=os.clock()
-    if checkBase(root) then session.phase="RETURN" end
+    -- V6: base is a respawn checkpoint. Clear old RNG mountain sectors once per base visit.
+    local atBase = checkBase(root)
+    if atBase and not session.baseLatched then
+        session.baseLatched=true
+        session.phase="RETURN";session.returnSince=now
+        session.sectors={};session.lastSector=nil;session.layer=0;session.habitatReached=false
+        session.lastValid=nil;session.lootTarget=nil;session.edgeLastScan=0;session.edgeSince=nil
+    elseif not atBase then
+        session.baseLatched=false
+    end
     if session.phase=="RETURN" then
+        if not knownMountain then
+            status.Text="RETURN FAILED: Save mountain entry first"
+            if flightV then flightV.Velocity=Vector3.zero end
+            return
+        end
         local d=flyTowards(root,knownMountain+Vector3.new(0,12,0),dt,10)
-        status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs\nMining paused at base",d)
+        status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs | %.0fs\nRNG map memory reset",d,now-session.returnSince)
         if d<15 then
             session.phase="EXPLORE";session.layer=0;resetSector(now,root)
             session.lastValid=root.Position;session.lastValidAt=now
+            session.heading=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z).Unit
+        elseif now-session.returnSince>RETURN_TIMEOUT then
+            -- No blind flight indefinitely if mountain entrance moved.
+            flight(root);flightV.Velocity=Vector3.zero
+            status.Text="RETURN TIMEOUT: check Mountain Entry\nThe new RNG mountain may have moved."
         end
         return
     end
@@ -4033,28 +4066,23 @@ RunService.Heartbeat:Connect(function(dt)
         if flightV then flightV.Velocity=Vector3.zero end
         return
     end
-    if now-session.lastScan>=1.6 then
-        session.lastScan=now
-        session.lootTarget=nearestCollectible(root)
+    -- V6: opportunistic collecting WHILE sweeping (never fly/chase crystal).
+    -- Scan infrequently, and press E at most once every COLLECT_INTERVAL seconds.
+    if now-session.lastScan >= COLLECT_SCAN_INTERVAL then
+        session.lastScan = now
+        session.lootTarget = nearestCollectible(root)
     end
-    local loot=session.lootTarget
-    if loot and loot.Parent and (loot.Position-root.Position).Magnitude<=15 then
-        if session.phase~="LOOT" then session.lootSince=now end
-        session.phase="LOOT"
-    elseif session.phase=="LOOT" then
-        session.phase="EXPLORE";session.lootTarget=nil
-    end
-    if session.phase=="LOOT" then
-        local distance=flyTowards(root,loot.Position,dt,3.6)
-        if distance<=6 and now-session.lastE>=.55 then
-            collectE(root,loot);session.lastE=now
+    local loot = session.lootTarget
+    if loot and loot.Parent and (loot.Position-root.Position).Magnitude <= 9 then
+        if now-session.lastE >= COLLECT_INTERVAL then
+            collectE(root,loot)
+            session.lastE=now
+            session.lootLast=loot
+            session.lootLastAt=now
+            -- allow other nearby crystals to be checked on the next scan
+            session.seen[loot]=now+1.2
+            session.lootTarget=nil
         end
-        if now-session.lootSince>2.5 or distance>20 then
-            session.seen[loot]=now+8
-            session.lootTarget=nil;session.phase="EXPLORE";session.lastScan=now+.3
-        end
-        status.Text=string.format("COLLECT NEARBY CRYSTAL\nDistance: %.1f | %.1fs left\nNext: resume sweep",distance,math.max(0,2.5-(now-session.lootSince)))
-        return
     end
     local boulderPos=boulderNearby(root)
     if boulderPos and (boulderPos-root.Position).Magnitude>7 then
@@ -4091,7 +4119,12 @@ RunService.Heartbeat:Connect(function(dt)
     end
     local direction=session.heading
     if direction.Magnitude<.1 then direction=Vector3.new(1,0,0) end
-    local layerGoalY=knownMountain.Y+math.min(targetTop,session.layer*layerHeight)
+    local desiredAltitude=math.min(targetTop,session.layer*layerHeight)
+    local layerGoalY=knownMountain.Y+desiredAltitude
+    -- When at habitat, clamp excursions to a narrow band around selected altitude.
+    if session.habitatReached then
+        layerGoalY=knownMountain.Y+targetTop
+    end
     local rise=math.clamp(layerGoalY-root.Position.Y,-8,8)
     if session.edgeFound then
         session.scanMode="DIGGING"
@@ -4121,12 +4154,18 @@ RunService.Heartbeat:Connect(function(dt)
         else
             session.scanMode="SEARCH / CLIMB"
             flight(root)
-            -- No endless ascent above the configured height. Reset to a known rock if lost.
-            local ceilingY=knownMountain.Y+targetTop
+            -- Never blindly ascend through empty sky above the habitat.
+            local ceilingY=knownMountain.Y+targetTop+HABITAT_BAND
             if root.Position.Y >= ceilingY then
-                flightV.Velocity=Vector3.zero
-                session.phase="RETURN"
-                session.scanMode="ALTITUDE CEILING / RETURN"
+                if session.lastValid then
+                    session.scanMode="SEEK LAST ROCK"
+                    flyTowards(root,session.lastValid,dt,3)
+                else
+                    flightV.Velocity=Vector3.new(0,-math.min(8,speed*.25),0)
+                end
+            elseif session.habitatReached then
+                -- Scan at current altitude rather than climbing above the habitat.
+                flightV.Velocity=Vector3.new(0,math.clamp((layerGoalY-root.Position.Y)*.7,-6,6),0)
             else
                 flightV.Velocity=Vector3.new(0,math.min(8,speed*.25),0)
             end
@@ -4145,21 +4184,22 @@ RunService.Heartbeat:Connect(function(dt)
     if stuck or (repeated and session.edgeFound) then
         turnHeading();resetSector(now,root);session.edgeLastScan=0
     end
-    if now-session.layerSince>48 or (barren and now-session.layerSince>20) then
+    if now-session.layerSince>22 or (barren and now-session.layerSince>12) then
         advanceLayer(now,root)
         session.edgeLastScan=0
     end
     -- Hard safety leash: if too far from entry, route back before resuming dig.
-    if (root.Position-knownMountain).Magnitude>math.max(200,targetTop*1.5) then
-        session.phase="RETURN"
+    local horizontalOffset=Vector3.new(root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z)
+    if horizontalOffset.Magnitude>math.max(600,targetTop*.65) then
+        session.phase="RETURN";session.returnSince=now
     end
-    status.Text=string.format("EXPLORE / SWEEP  | Speed %d\nLayer %d • target Y %.0f • sectors %d\n%s | %s",speed,session.layer,layerGoalY,
+    status.Text=string.format("V6 SWEEP | Speed %d | E %.2fs\nHeight target %.0f • sectors %d\n%s | %s",speed,COLLECT_INTERVAL,layerGoalY,
        (function() local n=0;for _ in pairs(session.sectors) do n+=1 end;return n end)(),
        session.scanMode,knownBase and "Auto return ON" or "Set Base for recovery")
 end)
 player.CharacterAdded:Connect(function()
     cleanup()
-    if session.enabled then session.phase="RETURN";session.lootTarget=nil end
+    if session.enabled then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
 
 switchPage("Home")
