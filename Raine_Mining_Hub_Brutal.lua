@@ -3686,6 +3686,8 @@ player.CharacterAdded:
 --// =========================================================
 
 --// =========================================================
+-- Separate function scope prevents the Luau 200-local-register compile error.
+task.spawn(function()
 --// SMART CRYSTAL FARM V3 (EXPERIMENTAL)
 --// Separate movement controller; does not alter old Fly/Mining toggles.
 --// =========================================================
@@ -4040,3 +4042,4 @@ player.CharacterAdded:Connect(function()
 end)
 
 switchPage("Home")
+end)
