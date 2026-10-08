@@ -8,6 +8,10 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local VirtualUser = game:GetService("VirtualUser")
+local VirtualInputManager = nil
+pcall(function()
+	VirtualInputManager = game:GetService("VirtualInputManager")
+end)
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -21,8 +25,15 @@ local BOULDER_REFRESH_TIME = 3
 local BOULDER_HEIGHT_OFFSET = 10
 
 local FLY_SPEED = 70
+local movementSpeed = 70
 
 local FORWARD_DISTANCE = 7
+
+local AUTO_BUY_CHECK_INTERVAL = 1.0
+local CATALOG_REFRESH_INTERVAL = 3.0
+local DESTRUCTIVE_RADIUS = 7
+local DESTRUCTIVE_SIDE = 6
+local DESTRUCTIVE_VERTICAL = 6
 
 local MINING_DIRECTIONS = {
 	["Atas"] = 2,
@@ -37,8 +48,14 @@ local MINING_DIRECTIONS = {
 
 local flyEnabled = false
 local autoMiningEnabled = false
+local destructiveMiningEnabled = false
+local autoBuyRadarEnabled = false
+local autoBuyBombEnabled = false
 
 local miningDirection = "Tengah"
+local selectedRadars = {}
+local selectedBombs = {}
+
 
 local savedPosition = nil
 
@@ -47,6 +64,7 @@ local bodyVelocity = nil
 local bodyGyro = nil
 
 local minimized = false
+local miniRadarFrame = nil
 
 
 --// =========================================================
@@ -60,6 +78,7 @@ local requestSell = ReplicatedStorage
 local digRequest = ReplicatedStorage
 	:WaitForChild("DigRemotes")
 	:WaitForChild("DigRequest")
+
 
 
 --// =========================================================
@@ -601,6 +620,10 @@ minimizeButton.MouseButton1Click:
 			sidebar.Visible = false
 			content.Visible = false
 
+			if miniRadarFrame then
+				miniRadarFrame.Visible = true
+			end
+
 			minimizeButton.Text = "□"
 
 			tween(
@@ -616,6 +639,10 @@ minimizeButton.MouseButton1Click:
 			)
 
 		else
+
+			if miniRadarFrame then
+				miniRadarFrame.Visible = false
+			end
 
 			minimizeButton.Text = "—"
 
@@ -868,6 +895,9 @@ local miningPage =
 local boulderPage =
 	createPage("Boulders")
 
+local radarPage =
+	createPage("Auto Buy")
+
 local movementPage =
 	createPage("Movement")
 
@@ -891,9 +921,15 @@ createTab(
 )
 
 createTab(
+	"Auto Buy",
+	"◉",
+	4
+)
+
+createTab(
 	"Movement",
 	"➜",
-	4
+	5
 )
 
 
@@ -1570,7 +1606,7 @@ local miningToggle =
 
 		"Auto Mining",
 
-		"Fire DigRequest otomatis setiap frame (Heartbeat)",
+		"Fire DigRequest otomatis setiap 0.12 detik",
 
 		UDim2.fromOffset(
 			16,
@@ -1721,7 +1757,7 @@ dropdown.Font =
 
 dropdown.AutoButtonColor = false
 
-dropdown.ZIndex = 10
+dropdown.ZIndex = 82
 
 dropdown.Parent =
 	directionCard
@@ -1741,9 +1777,9 @@ optionsFrame.AnchorPoint =
 optionsFrame.Position =
 	UDim2.new(
 		1,
-		-14,
+		-175,
 		0,
-		58
+		223
 	)
 
 optionsFrame.Size =
@@ -1763,10 +1799,10 @@ optionsFrame.BorderSizePixel = 0
 
 optionsFrame.Visible = false
 
-optionsFrame.ZIndex = 20
+optionsFrame.ZIndex = 80
 
 optionsFrame.Parent =
-	directionCard
+	miningPage
 
 addCorner(
 	optionsFrame,
@@ -1888,7 +1924,7 @@ for _, optionName
 
 	option.AutoButtonColor = false
 
-	option.ZIndex = 21
+	option.ZIndex = 81
 
 	option.Parent =
 		optionsFrame
@@ -1914,64 +1950,32 @@ end
 
 local miningInfo =
 	createCard(
-
 		miningPage,
-
-		UDim2.fromOffset(
-			16,
-			255
-		),
-
-		UDim2.new(
-			1,
-			-32,
-			0,
-			75
-		)
-
+		UDim2.fromOffset(16, 245),
+		UDim2.new(1, -32, 0, 62)
 	)
 
-
-local miningInfoText =
-	Instance.new("TextLabel")
-
-miningInfoText.Position =
-	UDim2.fromOffset(
-		14,
-		10
-	)
-
-miningInfoText.Size =
-	UDim2.new(
-		1,
-		-28,
-		1,
-		-20
-	)
-
+local miningInfoText = Instance.new("TextLabel")
+miningInfoText.Position = UDim2.fromOffset(14, 8)
+miningInfoText.Size = UDim2.new(1, -28, 1, -16)
 miningInfoText.BackgroundTransparency = 1
-
 miningInfoText.Text =
 	"Atas    → 7 studs maju + 2 atas\n"
 	.. "Tengah → 7 studs maju\n"
 	.. "Bawah   → 7 studs maju + 2 bawah"
+miningInfoText.TextColor3 = COLORS.SubText
+miningInfoText.TextSize = 10
+miningInfoText.Font = Enum.Font.Code
+miningInfoText.TextXAlignment = Enum.TextXAlignment.Left
+miningInfoText.TextYAlignment = Enum.TextYAlignment.Top
+miningInfoText.Parent = miningInfo
 
-miningInfoText.TextColor3 =
-	COLORS.SubText
-
-miningInfoText.TextSize = 11
-
-miningInfoText.Font =
-	Enum.Font.Code
-
-miningInfoText.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-miningInfoText.TextYAlignment =
-	Enum.TextYAlignment.Top
-
-miningInfoText.Parent =
-	miningInfo
+local destructiveToggle = createToggle(
+	miningPage,
+	"Destructive Mining",
+	"Burst tanpa wait: depan, kiri, kanan, atas, bawah + diagonal dalam frame yang sama",
+	UDim2.fromOffset(16, 315)
+)
 
 
 --// =========================================================
@@ -1984,109 +1988,73 @@ createHeader(
 	"Movement utility untuk navigasi area mining."
 )
 
+local flyToggle = createToggle(
+	movementPage,
+	"Fly",
+	"WASD • Space naik • Left Ctrl turun",
+	UDim2.fromOffset(16, 85)
+)
 
-local flyToggle =
-	createToggle(
+local speedCard = createCard(
+	movementPage,
+	UDim2.fromOffset(16, 165),
+	UDim2.new(1, -32, 0, 64)
+)
 
-		movementPage,
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Position = UDim2.fromOffset(15, 8)
+speedLabel.Size = UDim2.new(0.55, 0, 0, 22)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "Movement Speed"
+speedLabel.TextColor3 = COLORS.Text
+speedLabel.TextSize = 14
+speedLabel.Font = Enum.Font.GothamSemibold
+speedLabel.TextXAlignment = Enum.TextXAlignment.Left
+speedLabel.Parent = speedCard
 
-		"Fly",
+local speedDesc = Instance.new("TextLabel")
+speedDesc.Position = UDim2.fromOffset(15, 33)
+speedDesc.Size = UDim2.new(0.55, 0, 0, 18)
+speedDesc.BackgroundTransparency = 1
+speedDesc.Text = "Ketik angka bebas untuk kecepatan Fly"
+speedDesc.TextColor3 = COLORS.SubText
+speedDesc.TextSize = 10
+speedDesc.Font = Enum.Font.Gotham
+speedDesc.TextXAlignment = Enum.TextXAlignment.Left
+speedDesc.Parent = speedCard
 
-		"WASD • Space naik • Left Ctrl turun",
+local speedBox = Instance.new("TextBox")
+speedBox.AnchorPoint = Vector2.new(1, 0.5)
+speedBox.Position = UDim2.new(1, -14, 0.5, 0)
+speedBox.Size = UDim2.fromOffset(145, 38)
+speedBox.BackgroundColor3 = COLORS.Input
+speedBox.BorderSizePixel = 0
+speedBox.Text = tostring(movementSpeed)
+speedBox.PlaceholderText = "70"
+speedBox.TextColor3 = COLORS.Text
+speedBox.PlaceholderColor3 = COLORS.SubText
+speedBox.TextSize = 12
+speedBox.Font = Enum.Font.GothamMedium
+speedBox.ClearTextOnFocus = false
+speedBox.Parent = speedCard
+addCorner(speedBox, 8)
 
-		UDim2.fromOffset(
-			16,
-			85
-		)
-
-	)
-
-
-local flyCard =
-	createCard(
-
-		movementPage,
-
-		UDim2.fromOffset(
-			16,
-			165
-		),
-
-		UDim2.new(
-			1,
-			-32,
-			0,
-			92
-		)
-
-	)
-
-
-local flySpeedLabel = Instance.new("TextLabel")
-flySpeedLabel.Position = UDim2.fromOffset(15, 11)
-flySpeedLabel.Size = UDim2.new(0.55, 0, 0, 22)
-flySpeedLabel.BackgroundTransparency = 1
-flySpeedLabel.Text = "Fly Speed"
-flySpeedLabel.TextColor3 = COLORS.Text
-flySpeedLabel.TextSize = 14
-flySpeedLabel.Font = Enum.Font.GothamSemibold
-flySpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
-flySpeedLabel.Parent = flyCard
-
-local flySpeedDesc = Instance.new("TextLabel")
-flySpeedDesc.Position = UDim2.fromOffset(15, 37)
-flySpeedDesc.Size = UDim2.new(0.55, 0, 0, 18)
-flySpeedDesc.BackgroundTransparency = 1
-flySpeedDesc.Text = "Input speed sendiri • apply langsung"
-flySpeedDesc.TextColor3 = COLORS.SubText
-flySpeedDesc.TextSize = 10
-flySpeedDesc.Font = Enum.Font.Gotham
-flySpeedDesc.TextXAlignment = Enum.TextXAlignment.Left
-flySpeedDesc.Parent = flyCard
-
-local flySpeedUnit = Instance.new("TextLabel")
-flySpeedUnit.Position = UDim2.fromOffset(15, 59)
-flySpeedUnit.Size = UDim2.new(0.55, 0, 0, 16)
-flySpeedUnit.BackgroundTransparency = 1
-flySpeedUnit.Text = "studs/sec"
-flySpeedUnit.TextColor3 = COLORS.SubText
-flySpeedUnit.TextSize = 10
-flySpeedUnit.Font = Enum.Font.Gotham
-flySpeedUnit.TextXAlignment = Enum.TextXAlignment.Left
-flySpeedUnit.Parent = flyCard
-
-local flySpeedBox = Instance.new("TextBox")
-flySpeedBox.AnchorPoint = Vector2.new(1, 0.5)
-flySpeedBox.Position = UDim2.new(1, -14, 0.5, 0)
-flySpeedBox.Size = UDim2.fromOffset(125, 42)
-flySpeedBox.BackgroundColor3 = COLORS.Input
-flySpeedBox.BorderSizePixel = 0
-flySpeedBox.Text = tostring(FLY_SPEED)
-flySpeedBox.PlaceholderText = "70"
-flySpeedBox.ClearTextOnFocus = false
-flySpeedBox.TextColor3 = COLORS.Text
-flySpeedBox.PlaceholderColor3 = COLORS.SubText
-flySpeedBox.TextSize = 14
-flySpeedBox.Font = Enum.Font.GothamSemibold
-flySpeedBox.Parent = flyCard
-addCorner(flySpeedBox, 8)
-addStroke(flySpeedBox, 0.55)
-
-local function applyFlySpeed()
-	local value = tonumber(flySpeedBox.Text)
-
+speedBox.FocusLost:Connect(function()
+	local value = tonumber(speedBox.Text)
 	if value and value > 0 then
-		FLY_SPEED = math.clamp(value, 1, 5000)
-		flySpeedBox.Text = tostring(FLY_SPEED)
+		movementSpeed = math.clamp(value, 1, 1000)
+		speedBox.Text = tostring(movementSpeed)
 	else
-		flySpeedBox.Text = tostring(FLY_SPEED)
+		speedBox.Text = tostring(movementSpeed)
 	end
-end
-
-flySpeedBox.FocusLost:Connect(function()
-	applyFlySpeed()
 end)
 
+local ragdollToggle = createToggle(
+	movementPage,
+	"Ragdoll",
+	"ON = paksa Humanoid ke Physics • OFF = bangun kembali",
+	UDim2.fromOffset(16, 242)
+)
 
 --// =========================================================
 --// BOULDER PAGE
@@ -2094,306 +2062,667 @@ end)
 
 createHeader(
 	boulderPage,
-	"Boulder Teleport",
-	"Auto scan Workspace.Boulders setiap 3 detik."
+	"Boulder Tracker",
+	"Live boulder logger, nearest target, dan teleport list."
 )
 
+local boulderStatsCard = createCard(
+	boulderPage,
+	UDim2.fromOffset(16, 78),
+	UDim2.new(1, -32, 0, 96)
+)
 
--- Passive Boulder Logger embedded ke tab Boulders
-local boulderLoggerCard =
-	createCard(
-		boulderPage,
-		UDim2.fromOffset(24, 75),
-		UDim2.new(1, -48, 0, 100)
-	)
+local boulderStatsText = Instance.new("TextLabel")
+boulderStatsText.Position = UDim2.fromOffset(14, 10)
+boulderStatsText.Size = UDim2.new(1, -28, 1, -20)
+boulderStatsText.BackgroundTransparency = 1
+boulderStatsText.Text = "Ever seen: 0    Current: 0    Hidden: 0    Revealed: 0\nNearest: None\nDistance: -"
+boulderStatsText.TextColor3 = COLORS.SubText
+boulderStatsText.TextSize = 11
+boulderStatsText.Font = Enum.Font.Code
+boulderStatsText.TextXAlignment = Enum.TextXAlignment.Left
+boulderStatsText.TextYAlignment = Enum.TextYAlignment.Top
+boulderStatsText.Parent = boulderStatsCard
 
-local boulderLoggerInfo = Instance.new("TextLabel")
-boulderLoggerInfo.Position = UDim2.fromOffset(14, 10)
-boulderLoggerInfo.Size = UDim2.new(1, -28, 1, -20)
-boulderLoggerInfo.BackgroundTransparency = 1
-boulderLoggerInfo.Text =
-	"Ever seen : 0\n" ..
-	"Current   : 0\n" ..
-	"Hidden    : 0\n" ..
-	"Revealed  : 0\n" ..
-	"Nearest   : None (-)"
-boulderLoggerInfo.TextColor3 = COLORS.SubText
-boulderLoggerInfo.TextSize = 10
-boulderLoggerInfo.Font = Enum.Font.Code
-boulderLoggerInfo.TextXAlignment = Enum.TextXAlignment.Left
-boulderLoggerInfo.TextYAlignment = Enum.TextYAlignment.Top
-boulderLoggerInfo.Parent = boulderLoggerCard
-
-
-local boulderStatus =
-	Instance.new("TextLabel")
-
-boulderStatus.Position =
-	UDim2.fromOffset(
-		24,
-		184
-	)
-
-boulderStatus.Size =
-	UDim2.new(
-		1,
-		-48,
-		0,
-		25
-	)
-
+local boulderStatus = Instance.new("TextLabel")
+boulderStatus.Position = UDim2.fromOffset(24, 178)
+boulderStatus.Size = UDim2.new(1, -48, 0, 20)
 boulderStatus.BackgroundTransparency = 1
+boulderStatus.Text = "Scanning..."
+boulderStatus.TextColor3 = COLORS.SubText
+boulderStatus.TextSize = 10
+boulderStatus.Font = Enum.Font.GothamMedium
+boulderStatus.TextXAlignment = Enum.TextXAlignment.Left
+boulderStatus.Parent = boulderPage
 
-boulderStatus.Text =
-	"Scanning..."
-
-boulderStatus.TextColor3 =
-	COLORS.SubText
-
-boulderStatus.TextSize = 11
-
-boulderStatus.Font =
-	Enum.Font.GothamMedium
-
-boulderStatus.TextXAlignment =
-	Enum.TextXAlignment.Left
-
-boulderStatus.Parent =
-	boulderPage
-
-
-local boulderScroll =
-	Instance.new("ScrollingFrame")
-
-boulderScroll.Position =
-	UDim2.fromOffset(
-		24,
-		213
-	)
-
-boulderScroll.Size =
-	UDim2.new(
-		1,
-		-48,
-		1,
-		-228
-	)
-
-boulderScroll.BackgroundColor3 =
-	COLORS.Card
-
+local boulderScroll = Instance.new("ScrollingFrame")
+boulderScroll.Position = UDim2.fromOffset(16, 202)
+boulderScroll.Size = UDim2.new(1, -32, 1, -218)
+boulderScroll.BackgroundColor3 = COLORS.Card
 boulderScroll.BorderSizePixel = 0
-
 boulderScroll.ScrollBarThickness = 3
+boulderScroll.ScrollBarImageColor3 = COLORS.Accent
+boulderScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+boulderScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+boulderScroll.Parent = boulderPage
+addCorner(boulderScroll, 10)
+addStroke(boulderScroll, 0.55)
 
-boulderScroll.ScrollBarImageColor3 =
-	COLORS.Accent
+local boulderLayout = Instance.new("UIListLayout")
+boulderLayout.Padding = UDim.new(0, 6)
+boulderLayout.Parent = boulderScroll
 
-boulderScroll.CanvasSize =
-	UDim2.new(
-		0,
-		0,
-		0,
-		0
-	)
+local boulderPadding = Instance.new("UIPadding")
+boulderPadding.PaddingTop = UDim.new(0, 8)
+boulderPadding.PaddingBottom = UDim.new(0, 8)
+boulderPadding.PaddingLeft = UDim.new(0, 8)
+boulderPadding.PaddingRight = UDim.new(0, 8)
+boulderPadding.Parent = boulderScroll
 
-boulderScroll.AutomaticCanvasSize =
-	Enum.AutomaticSize.Y
+-- Compact directional radar shown only while the main hub is minimized.
+miniRadarFrame = Instance.new("Frame")
+miniRadarFrame.Name = "MiniBoulderRadar"
+miniRadarFrame.Size = UDim2.fromOffset(210, 210)
+miniRadarFrame.Position = UDim2.new(1, -230, 0.5, -105)
+miniRadarFrame.BackgroundColor3 = COLORS.Main
+miniRadarFrame.BorderSizePixel = 0
+miniRadarFrame.Visible = false
+miniRadarFrame.ZIndex = 100
+miniRadarFrame.Parent = gui
+addCorner(miniRadarFrame, 105)
+addStroke(miniRadarFrame, 0.1)
 
-boulderScroll.Parent =
-	boulderPage
+local miniRadarTitle = Instance.new("TextLabel")
+miniRadarTitle.Size = UDim2.new(1, -20, 0, 25)
+miniRadarTitle.Position = UDim2.fromOffset(10, 12)
+miniRadarTitle.BackgroundTransparency = 1
+miniRadarTitle.Text = "BOULDER RADAR"
+miniRadarTitle.TextColor3 = COLORS.Text
+miniRadarTitle.TextSize = 12
+miniRadarTitle.Font = Enum.Font.GothamBold
+miniRadarTitle.ZIndex = 101
+miniRadarTitle.Parent = miniRadarFrame
 
-addCorner(
-	boulderScroll,
-	10
-)
+local miniRadarArrow = Instance.new("TextLabel")
+miniRadarArrow.AnchorPoint = Vector2.new(0.5, 0.5)
+miniRadarArrow.Position = UDim2.fromScale(0.5, 0.46)
+miniRadarArrow.Size = UDim2.fromOffset(70, 70)
+miniRadarArrow.BackgroundTransparency = 1
+miniRadarArrow.Text = "▲"
+miniRadarArrow.TextColor3 = COLORS.Accent
+miniRadarArrow.TextSize = 48
+miniRadarArrow.Font = Enum.Font.GothamBlack
+miniRadarArrow.ZIndex = 101
+miniRadarArrow.Parent = miniRadarFrame
 
-addStroke(
-	boulderScroll,
-	0.55
-)
-
-
-local boulderLayout =
-	Instance.new("UIListLayout")
-
-boulderLayout.Padding =
-	UDim.new(
-		0,
-		6
-	)
-
-boulderLayout.Parent =
-	boulderScroll
-
-
-local boulderPadding =
-	Instance.new("UIPadding")
-
-boulderPadding.PaddingTop =
-	UDim.new(
-		0,
-		8
-	)
-
-boulderPadding.PaddingBottom =
-	UDim.new(
-		0,
-		8
-	)
-
-boulderPadding.PaddingLeft =
-	UDim.new(
-		0,
-		8
-	)
-
-boulderPadding.PaddingRight =
-	UDim.new(
-		0,
-		8
-	)
-
-boulderPadding.Parent =
-	boulderScroll
-
+local miniRadarInfo = Instance.new("TextLabel")
+miniRadarInfo.Size = UDim2.new(1, -24, 0, 68)
+miniRadarInfo.Position = UDim2.new(0, 12, 1, -78)
+miniRadarInfo.BackgroundTransparency = 1
+miniRadarInfo.Text = "No boulder\n-\nX -  Y -  Z -"
+miniRadarInfo.TextColor3 = COLORS.Text
+miniRadarInfo.TextSize = 10
+miniRadarInfo.Font = Enum.Font.Code
+miniRadarInfo.TextXAlignment = Enum.TextXAlignment.Center
+miniRadarInfo.TextYAlignment = Enum.TextYAlignment.Center
+miniRadarInfo.ZIndex = 101
+miniRadarInfo.Parent = miniRadarFrame
 
 --// =========================================================
---// PASSIVE BOULDER LOGGER
+--// AUTO BUY PAGE - LIVE STOCK / EVENT DRIVEN
 --// =========================================================
 
-local passiveSeen = {}
-local passiveSeenCount = 0
-local passiveLastDistance = "-"
+createHeader(
+	radarPage,
+	"Auto Buy",
+	"Live stock Radar/Bomb. Tidak spam scan atau remote."
+)
 
-local function getPassiveBoulderPosition(obj)
-	if obj:IsA("Model") then
-		local mesh = obj:FindFirstChild("Mesh_0", true)
+local autoBuyStatus = Instance.new("TextLabel")
+autoBuyStatus.Position = UDim2.fromOffset(24, 72)
+autoBuyStatus.Size = UDim2.new(1, -48, 0, 18)
+autoBuyStatus.BackgroundTransparency = 1
+autoBuyStatus.Text = "Waiting for RadarShopGui / BombShopGui..."
+autoBuyStatus.TextColor3 = COLORS.SubText
+autoBuyStatus.TextSize = 10
+autoBuyStatus.Font = Enum.Font.GothamMedium
+autoBuyStatus.TextXAlignment = Enum.TextXAlignment.Left
+autoBuyStatus.Parent = radarPage
 
-		if mesh and mesh:IsA("BasePart") then
-			return mesh.Position
+local radarToggle = createToggle(
+	radarPage,
+	"Auto Buy Radar",
+	"ON = beli radar terpilih sekali saat stock refresh > 0",
+	UDim2.fromOffset(16, 96)
+)
+
+local bombToggle = createToggle(
+	radarPage,
+	"Auto Buy Bomb",
+	"ON = beli bomb terpilih sekali saat stock refresh > 0",
+	UDim2.fromOffset(16, 170)
+)
+
+local pickerCard = createCard(
+	radarPage,
+	UDim2.fromOffset(16, 244),
+	UDim2.new(1, -32, 0, 126)
+)
+
+local radarPickerLabel = Instance.new("TextLabel")
+radarPickerLabel.Position = UDim2.fromOffset(14, 7)
+radarPickerLabel.Size = UDim2.new(0.5, -20, 0, 20)
+radarPickerLabel.BackgroundTransparency = 1
+radarPickerLabel.Text = "Radar"
+radarPickerLabel.TextColor3 = COLORS.Text
+radarPickerLabel.TextSize = 12
+radarPickerLabel.Font = Enum.Font.GothamSemibold
+radarPickerLabel.TextXAlignment = Enum.TextXAlignment.Left
+radarPickerLabel.Parent = pickerCard
+
+local bombPickerLabel = radarPickerLabel:Clone()
+bombPickerLabel.Position = UDim2.new(0.5, 6, 0, 7)
+bombPickerLabel.Text = "Bomb"
+bombPickerLabel.Parent = pickerCard
+
+local radarDropdown = Instance.new("TextButton")
+radarDropdown.Position = UDim2.fromOffset(14, 32)
+radarDropdown.Size = UDim2.new(0.5, -21, 0, 38)
+radarDropdown.BackgroundColor3 = COLORS.Input
+radarDropdown.Text = "Select radar...      ▼"
+radarDropdown.TextColor3 = COLORS.Text
+radarDropdown.TextSize = 11
+radarDropdown.Font = Enum.Font.GothamMedium
+radarDropdown.AutoButtonColor = false
+radarDropdown.ZIndex = 82
+radarDropdown.Parent = pickerCard
+addCorner(radarDropdown, 8)
+
+local bombDropdown = radarDropdown:Clone()
+bombDropdown.Position = UDim2.new(0.5, 7, 0, 32)
+bombDropdown.Text = "Select bomb...      ▼"
+bombDropdown.Parent = pickerCard
+
+local refreshCatalogButton = createActionButton(
+	pickerCard,
+	"↻ Rebind Shop Slots",
+	UDim2.fromOffset(14, 78),
+	UDim2.new(1, -28, 0, 34)
+)
+
+local function makeFloatingOptionsFrame()
+	local frame = Instance.new("ScrollingFrame")
+	frame.Size = UDim2.fromOffset(230, 170)
+	frame.BackgroundColor3 = Color3.fromRGB(20, 22, 29)
+	frame.BorderSizePixel = 0
+	frame.Visible = false
+	frame.ZIndex = 200
+	frame.ScrollBarThickness = 3
+	frame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	frame.CanvasSize = UDim2.new()
+	frame.Parent = gui
+	addCorner(frame, 8)
+	addStroke(frame, 0.15)
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 3)
+	layout.Parent = frame
+
+	local padding = Instance.new("UIPadding")
+	padding.PaddingTop = UDim.new(0, 5)
+	padding.PaddingBottom = UDim.new(0, 5)
+	padding.PaddingLeft = UDim.new(0, 5)
+	padding.PaddingRight = UDim.new(0, 5)
+	padding.Parent = frame
+	return frame
+end
+
+local radarOptionsFrame = makeFloatingOptionsFrame()
+local bombOptionsFrame = makeFloatingOptionsFrame()
+local radarDropdownOpen = false
+local bombDropdownOpen = false
+local radarCatalog = {}
+local bombCatalog = {}
+
+local function placePopupBelow(button, frame)
+	local pos = button.AbsolutePosition
+	local size = button.AbsoluteSize
+	local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+	local width = math.max(size.X, 230)
+	frame.Size = UDim2.fromOffset(width, 170)
+	local x = math.clamp(pos.X, 6, math.max(6, viewport.X - width - 6))
+	local y = pos.Y + size.Y + 4
+	if y + 170 > viewport.Y - 6 then
+		y = math.max(6, pos.Y - 174)
+	end
+	frame.Position = UDim2.fromOffset(x, y)
+end
+
+local function clearOptionButtons(frame)
+	for _, child in ipairs(frame:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
 		end
+	end
+end
 
-		local ok, cf = pcall(function()
-			return obj:GetPivot()
+local function selectedCount(selection)
+	local n = 0
+	for _, value in pairs(selection) do
+		if value then n += 1 end
+	end
+	return n
+end
+
+local liveRadarStock = {}
+local liveBombStock = {}
+local stockConnections = {}
+local boundStockLabels = {}
+local watchedShopBodies = {}
+local refreshQueued = false
+
+-- One request is allowed per observed stock-state change. This drains xN stock
+-- one-by-one as the shop UI confirms each successful purchase by decrementing.
+local radarBuyInFlight = {}
+local bombBuyInFlight = {}
+-- Bomb-only: track confirmed progress and use bounded retries when stock stalls.
+local bombActiveLabels = {}
+local bombAttemptCounts = {}
+local bombRequestTokens = {}
+local BOMB_MAX_ATTEMPTS = 3
+local BOMB_ACK_TIMEOUT = 2.5
+
+local function getRemote(folderName, remoteName)
+	local folder = ReplicatedStorage:FindFirstChild(folderName)
+	return folder and folder:FindFirstChild(remoteName)
+end
+
+local function isTextObject(obj)
+	return obj
+		and (obj:IsA("TextLabel")
+			or obj:IsA("TextButton")
+			or obj:IsA("TextBox"))
+end
+
+local function parseStock(textValue)
+	local text = tostring(textValue or "")
+	local n = text:match("[xX]%s*(%d+)")
+	if not n then
+		n = text:match("(%d+)%s*[sS][tT][oO][cC][kK]")
+	end
+	return n and tonumber(n) or nil
+end
+
+local function getLiveStock(kind, itemName)
+	if kind == "Radar" then
+		return liveRadarStock[itemName]
+	end
+	return liveBombStock[itemName]
+end
+
+local function isSelectedAndEnabled(kind, itemName)
+	if kind == "Radar" then
+		return autoBuyRadarEnabled and selectedRadars[itemName] == true
+	end
+	return autoBuyBombEnabled and selectedBombs[itemName] == true
+end
+
+local function getInFlightTable(kind)
+	return kind == "Radar" and radarBuyInFlight or bombBuyInFlight
+end
+
+local function tryBuyOne(kind, itemName, reason)
+	if not isSelectedAndEnabled(kind, itemName) then
+		return
+	end
+
+	local stock = getLiveStock(kind, itemName)
+	if not stock or stock < 1 then
+		return
+	end
+
+	local inFlight = getInFlightTable(kind)
+	if inFlight[itemName] then
+		return
+	end
+
+	local remote
+	if kind == "Radar" then
+		remote = getRemote("RadarRemotes", "BuyRadar")
+	else
+		remote = getRemote("BombRemotes", "BuyBomb")
+	end
+
+	if not remote then
+		autoBuyStatus.Text = "Buy" .. kind .. " remote not found"
+		return
+	end
+
+	-- Send only one outstanding request per item until stock confirms a change.
+	inFlight[itemName] = true
+	local bombToken
+	if kind == "Bomb" then
+		bombAttemptCounts[itemName] = (bombAttemptCounts[itemName] or 0) + 1
+		bombRequestTokens[itemName] = (bombRequestTokens[itemName] or 0) + 1
+		bombToken = bombRequestTokens[itemName]
+	end
+
+	if kind == "Radar" then
+		remote:FireServer(itemName)
+	else
+		remote:FireServer(itemName, "cash")
+	end
+
+	autoBuyStatus.Text = kind .. ": " .. itemName .. " • x" .. tostring(stock) .. " • buy sent (" .. reason .. ")"
+
+	if kind == "Bomb" then
+		-- If shop stock doesn't move, retry at most twice. Stop if the server
+		-- refuses purchases (no money / limit / remote argument mismatch).
+		task.delay(BOMB_ACK_TIMEOUT, function()
+			if bombRequestTokens[itemName] ~= bombToken then return end
+			if not inFlight[itemName] or not isSelectedAndEnabled("Bomb", itemName) then return end
+			local label = bombActiveLabels[itemName]
+			local observed = label and label.Parent and parseStock(label.Text)
+			if observed == nil or observed ~= stock then return end
+			inFlight[itemName] = nil
+			if (bombAttemptCounts[itemName] or 0) < BOMB_MAX_ATTEMPTS then
+				tryBuyOne("Bomb", itemName, "ack timeout retry")
+			else
+				autoBuyStatus.Text = "Bomb: " .. itemName .. " x" .. stock .. " • no stock response after 3 requests (paused)"
+			end
 		end)
+	else
+		-- Radar path unchanged.
+		task.delay(2, function()
+			if inFlight[itemName] then
+				inFlight[itemName] = nil
+			end
+		end)
+	end
+end
 
-		if ok and cf then
-			return cf.Position
+local function onStockChanged(kind, itemName, stockLabel, reason)
+	if not stockLabel or not stockLabel.Parent then return end
+
+	local newStock = parseStock(stockLabel.Text)
+	if newStock == nil then return end
+
+	if kind == "Radar" then
+		liveRadarStock[itemName] = newStock
+		radarBuyInFlight[itemName] = nil
+	else
+		if bombActiveLabels[itemName] ~= stockLabel then return end
+		local previous = liveBombStock[itemName]
+		if previous == newStock and reason ~= "shop bind/restock" then return end
+		liveBombStock[itemName] = newStock
+		bombBuyInFlight[itemName] = nil
+		bombAttemptCounts[itemName] = 0
+		bombRequestTokens[itemName] = (bombRequestTokens[itemName] or 0) + 1
+	end
+
+	-- Every confirmed stock state is enough. If x3 -> x2 after a successful
+	-- purchase, this sends the next single request. x2 -> x1 sends the next, etc.
+	-- When it reaches x0, it stops naturally.
+	if newStock > 0 then
+		tryBuyOne(kind, itemName, reason or "stock changed")
+	end
+end
+
+local function bindStockLabel(kind, itemName, stockLabel)
+	if not isTextObject(stockLabel) then return end
+	if boundStockLabels[stockLabel] then return end
+	boundStockLabels[stockLabel] = true
+
+	-- A newly created Stock label means the shop may just have restocked/rebuilt.
+	-- Treat it as a fresh state even if the numeric stock equals the previous cycle.
+	if kind == "Radar" then
+		radarBuyInFlight[itemName] = nil
+	else
+		bombActiveLabels[itemName] = stockLabel
+		bombBuyInFlight[itemName] = nil
+		bombAttemptCounts[itemName] = 0
+		bombRequestTokens[itemName] = (bombRequestTokens[itemName] or 0) + 1
+	end
+
+	onStockChanged(kind, itemName, stockLabel, "shop bind/restock")
+
+	local connection = stockLabel:GetPropertyChangedSignal("Text"):Connect(function()
+		onStockChanged(kind, itemName, stockLabel, "stock changed")
+	end)
+	table.insert(stockConnections, connection)
+end
+
+local function findStockLabel(slot)
+	local card = slot:FindFirstChild("Card")
+	if card then
+		local stock = card:FindFirstChild("Stock")
+		if isTextObject(stock) then
+			return stock
 		end
+	end
 
-	elseif obj:IsA("BasePart") then
-		return obj.Position
+	for _, obj in ipairs(slot:GetDescendants()) do
+		if obj.Name == "Stock" and isTextObject(obj) then
+			return obj
+		end
 	end
 
 	return nil
 end
 
-local function passiveUniqueKey(obj)
-	local id = obj:GetAttribute("BoulderId")
+local refreshShopBindings
 
-	if id ~= nil then
-		return tostring(id)
-	end
+local function queueShopRefresh()
+	if refreshQueued then return end
+	refreshQueued = true
 
-	local pos = getPassiveBoulderPosition(obj)
-
-	if pos then
-		return string.format(
-			"%s_%.0f_%.0f_%.0f",
-			obj.Name,
-			pos.X,
-			pos.Y,
-			pos.Z
-		)
-	end
-
-	return obj.Name .. "_" .. tostring(obj)
-end
-
-local function rememberPassiveBoulder(obj)
-	local key = passiveUniqueKey(obj)
-
-	if not passiveSeen[key] then
-		passiveSeen[key] = {
-			name = obj.Name,
-			pos = getPassiveBoulderPosition(obj)
-		}
-
-		passiveSeenCount += 1
-	end
-end
-
-local passiveBoulderFolder = workspace:WaitForChild("Boulders")
-
-for _, obj in ipairs(passiveBoulderFolder:GetChildren()) do
-	rememberPassiveBoulder(obj)
-end
-
-passiveBoulderFolder.ChildAdded:Connect(function(obj)
-	task.wait(0.1)
-	rememberPassiveBoulder(obj)
-end)
-
-local function updatePassiveBoulderLogger()
-	if not boulderLoggerInfo or not boulderLoggerInfo.Parent then
-		return
-	end
-
-	local current = passiveBoulderFolder:GetChildren()
-	local hidden = 0
-	local revealed = 0
-
-	for _, obj in ipairs(current) do
-		if obj:GetAttribute("Revealed") == true then
-			revealed += 1
-		else
-			hidden += 1
+	task.defer(function()
+		task.wait(0.05)
+		refreshQueued = false
+		if refreshShopBindings then
+			refreshShopBindings()
 		end
-	end
+	end)
+end
 
-	local char = player.Character
-	local root = char and char:FindFirstChild("HumanoidRootPart")
+local function rebuildCatalogsFromShop()
+	table.clear(radarCatalog)
+	table.clear(bombCatalog)
 
-	local nearestName = "None"
-	local nearestDist = math.huge
+	local function scanShop(guiName, kind, catalog)
+		local shopGui = playerGui:FindFirstChild(guiName)
+		local window = shopGui and shopGui:FindFirstChild("Window")
+		local body = window and window:FindFirstChild("Body")
+		if not body then return end
 
-	if root then
-		for _, obj in ipairs(current) do
-			local pos = getPassiveBoulderPosition(obj)
+		if not watchedShopBodies[body] then
+			watchedShopBodies[body] = true
 
-			if pos then
-				local dist = (pos - root.Position).Magnitude
+			body.ChildAdded:Connect(function(child)
+				if child.Name:sub(1, 5) == "Slot_" then
+					queueShopRefresh()
+				end
+			end)
 
-				if dist < nearestDist then
-					nearestDist = dist
-					nearestName = obj.Name
+			body.ChildRemoved:Connect(function(child)
+				if child.Name:sub(1, 5) == "Slot_" then
+					queueShopRefresh()
+				end
+			end)
+
+			body.DescendantAdded:Connect(function(obj)
+				if obj.Name == "Stock" and isTextObject(obj) then
+					queueShopRefresh()
+				end
+			end)
+		end
+
+		for _, slot in ipairs(body:GetChildren()) do
+			if slot.Name:sub(1, 5) == "Slot_" then
+				local itemName = slot.Name:sub(6)
+				table.insert(catalog, itemName)
+				local stockLabel = findStockLabel(slot)
+				if stockLabel then
+					bindStockLabel(kind, itemName, stockLabel)
 				end
 			end
 		end
 	end
 
-	if nearestDist < math.huge then
-		passiveLastDistance = math.floor(nearestDist + 0.5) .. " studs"
-	else
-		passiveLastDistance = "-"
-	end
-
-	boulderLoggerInfo.Text =
-		"Ever seen : " .. passiveSeenCount ..
-		"\nCurrent   : " .. #current ..
-		"\nHidden    : " .. hidden ..
-		"\nRevealed  : " .. revealed ..
-		"\nNearest   : " .. nearestName .. " (" .. passiveLastDistance .. ")"
+	scanShop("RadarShopGui", "Radar", radarCatalog)
+	scanShop("BombShopGui", "Bomb", bombCatalog)
+	table.sort(radarCatalog)
+	table.sort(bombCatalog)
 end
 
-task.spawn(function()
-	while gui.Parent do
-		updatePassiveBoulderLogger()
-		task.wait(0.5)
+local function updateMultiDropdownText(button, selection, noun)
+	local n = selectedCount(selection)
+	if n == 0 then
+		button.Text = "Select " .. noun .. "...      ▼"
+	elseif n == 1 then
+		for name, yes in pairs(selection) do
+			if yes then
+				button.Text = name .. "      ▼"
+				break
+			end
+		end
+	else
+		button.Text = tostring(n) .. " " .. noun .. "s selected      ▼"
+	end
+end
+
+local function populateMultiOptions(frame, items, selection, button, noun, kind)
+	clearOptionButtons(frame)
+	for _, itemName in ipairs(items) do
+		local option = Instance.new("TextButton")
+		option.Size = UDim2.new(1, -10, 0, 32)
+		option.BackgroundColor3 = COLORS.Input
+		option.BorderSizePixel = 0
+		option.TextColor3 = COLORS.Text
+		option.TextSize = 11
+		option.Font = Enum.Font.GothamMedium
+		option.AutoButtonColor = false
+		option.ZIndex = 201
+		option.Parent = frame
+		addCorner(option, 6)
+
+		local function redraw()
+			local stock = getLiveStock(kind, itemName)
+			local stockText = stock ~= nil and ("  [x" .. tostring(stock) .. "]") or ""
+			option.Text = (selection[itemName] and "✓  " or "○  ") .. itemName .. stockText
+			option.BackgroundColor3 = selection[itemName] and COLORS.AccentDark or COLORS.Input
+		end
+
+		redraw()
+		option.MouseButton1Click:Connect(function()
+			selection[itemName] = not selection[itemName] or nil
+			redraw()
+			updateMultiDropdownText(button, selection, noun)
+
+			if selection[itemName] then
+				local inFlight = getInFlightTable(kind)
+				inFlight[itemName] = nil
+				if kind == "Bomb" then
+					bombAttemptCounts[itemName] = 0
+					bombRequestTokens[itemName] = (bombRequestTokens[itemName] or 0) + 1
+				end
+				tryBuyOne(kind, itemName, "selected")
+			end
+		end)
+	end
+end
+
+refreshShopBindings = function()
+	rebuildCatalogsFromShop()
+	populateMultiOptions(radarOptionsFrame, radarCatalog, selectedRadars, radarDropdown, "radar", "Radar")
+	populateMultiOptions(bombOptionsFrame, bombCatalog, selectedBombs, bombDropdown, "bomb", "Bomb")
+	updateMultiDropdownText(radarDropdown, selectedRadars, "radar")
+	updateMultiDropdownText(bombDropdown, selectedBombs, "bomb")
+	autoBuyStatus.Text = "Live bound: " .. #radarCatalog .. " radar(s) • " .. #bombCatalog .. " bomb(s)"
+end
+
+radarDropdown.MouseButton1Click:Connect(function()
+	radarDropdownOpen = not radarDropdownOpen
+	bombDropdownOpen = false
+	bombOptionsFrame.Visible = false
+	if radarDropdownOpen then
+		refreshShopBindings()
+		placePopupBelow(radarDropdown, radarOptionsFrame)
+	end
+	radarOptionsFrame.Visible = radarDropdownOpen
+end)
+
+bombDropdown.MouseButton1Click:Connect(function()
+	bombDropdownOpen = not bombDropdownOpen
+	radarDropdownOpen = false
+	radarOptionsFrame.Visible = false
+	if bombDropdownOpen then
+		refreshShopBindings()
+		placePopupBelow(bombDropdown, bombOptionsFrame)
+	end
+	bombOptionsFrame.Visible = bombDropdownOpen
+end)
+
+refreshCatalogButton.MouseButton1Click:Connect(refreshShopBindings)
+
+RunService.RenderStepped:Connect(function()
+	if radarDropdownOpen and radarOptionsFrame.Visible then placePopupBelow(radarDropdown, radarOptionsFrame) end
+	if bombDropdownOpen and bombOptionsFrame.Visible then placePopupBelow(bombDropdown, bombOptionsFrame) end
+end)
+
+radarToggle.OnChanged = function(enabled)
+	autoBuyRadarEnabled = enabled
+	if enabled then
+		refreshShopBindings()
+		for itemName, selected in pairs(selectedRadars) do
+			if selected and (liveRadarStock[itemName] or 0) > 0 then
+				radarBuyInFlight[itemName] = nil
+				tryBuyOne("Radar", itemName, "toggle on")
+			end
+		end
+	else
+		table.clear(radarBuyInFlight)
+	end
+end
+
+bombToggle.OnChanged = function(enabled)
+	autoBuyBombEnabled = enabled
+	if enabled then
+		refreshShopBindings()
+		for itemName, selected in pairs(selectedBombs) do
+			if selected and (liveBombStock[itemName] or 0) > 0 then
+				bombBuyInFlight[itemName] = nil
+				bombAttemptCounts[itemName] = 0
+				bombRequestTokens[itemName] = (bombRequestTokens[itemName] or 0) + 1
+				tryBuyOne("Bomb", itemName, "toggle on")
+			end
+		end
+	else
+		table.clear(bombBuyInFlight)
+		table.clear(bombAttemptCounts)
+		for itemName in pairs(bombRequestTokens) do
+			bombRequestTokens[itemName] += 1
+		end
+	end
+end
+
+-- Bind once now, then rebind whenever the shop GUI or its internal slots are rebuilt.
+task.defer(refreshShopBindings)
+
+playerGui.ChildAdded:Connect(function(child)
+	if child.Name == "RadarShopGui" or child.Name == "BombShopGui" then
+		task.delay(0.25, queueShopRefresh)
 	end
 end)
 
+playerGui.DescendantAdded:Connect(function(obj)
+	if obj.Name == "Body" then
+		local fullName = obj:GetFullName()
+		if fullName:find("RadarShopGui", 1, true) or fullName:find("BombShopGui", 1, true) then
+			queueShopRefresh()
+		end
+	end
+end)
 
 --// =========================================================
 --// SELL ALL
@@ -2773,7 +3102,7 @@ local function startFly()
 
 					bodyVelocity.Velocity =
 						direction
-						* FLY_SPEED
+						* movementSpeed
 
 				end
 
@@ -2837,6 +3166,29 @@ flyToggle.OnChanged =
 
 	end
 
+
+local ragdollEnabled = false
+
+local function setRagdoll(enabled)
+	local humanoid = getHumanoid()
+	if not humanoid then return end
+	ragdollEnabled = enabled
+	if enabled then
+		pcall(function()
+			humanoid.AutoRotate = false
+			humanoid:ChangeState(Enum.HumanoidStateType.Physics)
+		end)
+	else
+		pcall(function()
+			humanoid.AutoRotate = true
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end)
+	end
+end
+
+ragdollToggle.OnChanged = function(enabled)
+	setRagdoll(enabled)
+end
 
 --// =========================================================
 --// MINING POSITION
@@ -2957,537 +3309,353 @@ end
 
 miningToggle.OnChanged =
 	function(enabled)
-
-		autoMiningEnabled =
-			enabled
-
+		autoMiningEnabled = enabled
 	end
 
+destructiveToggle.OnChanged = function(enabled)
+	destructiveMiningEnabled = enabled
+end
 
--- Fast mining: satu DigRequest setiap Heartbeat/frame.
--- Kecepatan efektif tetap bisa dibatasi oleh server game.
+local function destructiveDigBurst()
+	local root = getRoot()
+	if not root then return end
+	local look = root.CFrame.LookVector
+	local forward = Vector3.new(look.X, 0, look.Z)
+	if forward.Magnitude < 0.01 then return end
+	forward = forward.Unit
+	local right = Vector3.new(-forward.Z, 0, forward.X)
+	local up = Vector3.yAxis
+	local base = root.Position
+	-- all requests are fired in the same Heartbeat with no task.wait between them
+	local offsets = {
+		forward * DESTRUCTIVE_RADIUS,
+		forward * (DESTRUCTIVE_RADIUS + 4),
+		right * DESTRUCTIVE_SIDE,
+		-right * DESTRUCTIVE_SIDE,
+		up * DESTRUCTIVE_VERTICAL,
+		-up * DESTRUCTIVE_VERTICAL,
+		forward * 5 + right * 5,
+		forward * 5 - right * 5,
+		forward * 5 + up * 5,
+		forward * 5 - up * 5,
+		right * 5 + up * 4,
+		-right * 5 + up * 4,
+		right * 5 - up * 4,
+		-right * 5 - up * 4,
+	}
+	for _, offset in ipairs(offsets) do
+		local p = base + offset
+		digRequest:FireServer(createDigVector(p.X, p.Y, p.Z))
+	end
+end
+
+--// FAST MINING - EVERY HEARTBEAT
 RunService.Heartbeat:Connect(function()
 
 	if autoMiningEnabled then
-
 		digInFront()
-
+	end
+	if destructiveMiningEnabled then
+		destructiveDigBurst()
 	end
 
 end)
 
 
 --// =========================================================
---// BOULDER FUNCTIONS
+--// BOULDER FUNCTIONS + PASSIVE LOGGER
 --// =========================================================
 
-local function getBoulderTop(
-	boulder
-)
+local seenBoulders = {}
+local seenCount = 0
+local nearestBoulder = nil
+local nearestBoulderPosition = nil
+local nearestBoulderDistance = math.huge
 
+local function getBoulderPosition(boulder)
 	if not boulder then
 		return nil
 	end
 
-
-	if boulder:IsA(
-		"BasePart"
-	) then
-
-		return Vector3.new(
-
-			boulder.Position.X,
-
-			boulder.Position.Y
-				+ (
-					boulder.Size.Y
-					/ 2
-				)
-				+ BOULDER_HEIGHT_OFFSET,
-
-			boulder.Position.Z
-
-		)
-
-	end
-
-
-	if boulder:IsA(
-		"Model"
-	) then
-
-		local success,
-			cf,
-			size =
-			pcall(function()
-
-				local boundingCF,
-					boundingSize =
-					boulder:GetBoundingBox()
-
-				return
-					boundingCF,
-					boundingSize
-
-			end)
-
-
-		if success
-			and cf
-			and size then
-
-			return Vector3.new(
-
-				cf.Position.X,
-
-				cf.Position.Y
-					+ (
-						size.Y
-						/ 2
-					)
-					+ BOULDER_HEIGHT_OFFSET,
-
-				cf.Position.Z
-
-			)
-
+	if boulder:IsA("Model") then
+		local mesh = boulder:FindFirstChild("Mesh_0", true)
+		if mesh and mesh:IsA("BasePart") then
+			return mesh.Position
 		end
-
+		local ok, cf = pcall(function()
+			return boulder:GetPivot()
+		end)
+		if ok and cf then
+			return cf.Position
+		end
+	elseif boulder:IsA("BasePart") then
+		return boulder.Position
 	end
 
-
-	local part =
-		boulder:
-			FindFirstChildWhichIsA(
-				"BasePart",
-				true
-			)
-
-
-	if part then
-
-		return Vector3.new(
-
-			part.Position.X,
-
-			part.Position.Y
-				+ (
-					part.Size.Y
-					/ 2
-				)
-				+ BOULDER_HEIGHT_OFFSET,
-
-			part.Position.Z
-
-		)
-
-	end
-
-
-	return nil
-
+	local part = boulder:FindFirstChildWhichIsA("BasePart", true)
+	return part and part.Position or nil
 end
 
+local function getBoulderTop(boulder)
+	local pos = getBoulderPosition(boulder)
+	if not pos then
+		return nil
+	end
 
-local function teleportToBoulder(
-	boulder
-)
+	if boulder:IsA("BasePart") then
+		return Vector3.new(pos.X, pos.Y + (boulder.Size.Y / 2) + BOULDER_HEIGHT_OFFSET, pos.Z)
+	end
 
-	local root =
-		getRoot()
+	if boulder:IsA("Model") then
+		local ok, cf, size = pcall(function()
+			local c, s = boulder:GetBoundingBox()
+			return c, s
+		end)
+		if ok and cf and size then
+			return Vector3.new(cf.Position.X, cf.Position.Y + (size.Y / 2) + BOULDER_HEIGHT_OFFSET, cf.Position.Z)
+		end
+	end
 
+	return pos + Vector3.new(0, BOULDER_HEIGHT_OFFSET, 0)
+end
 
+local function uniqueBoulderKey(obj)
+	local id = obj:GetAttribute("BoulderId")
+	if id ~= nil then
+		return tostring(id)
+	end
+	local pos = getBoulderPosition(obj)
+	if pos then
+		return string.format("%s_%.0f_%.0f_%.0f", obj.Name, pos.X, pos.Y, pos.Z)
+	end
+	return obj.Name .. "_" .. tostring(obj)
+end
+
+local function rememberBoulder(obj)
+	local key = uniqueBoulderKey(obj)
+	if not seenBoulders[key] then
+		seenBoulders[key] = true
+		seenCount += 1
+	end
+end
+
+local function teleportToBoulder(boulder)
+	local root = getRoot()
 	if not root then
 		return
 	end
-
-
-	local target =
-		getBoulderTop(
-			boulder
-		)
-
-
+	local target = getBoulderTop(boulder)
 	if not target then
 		return
 	end
+	local look = root.CFrame.LookVector
+	local flatLook = Vector3.new(look.X, 0, look.Z)
+	if flatLook.Magnitude < 0.01 then
+		flatLook = Vector3.new(0, 0, -1)
+	end
+	root.CFrame = CFrame.lookAt(target, target + flatLook.Unit)
+	root.AssemblyLinearVelocity = Vector3.zero
+end
 
+local function createBoulderButton(boulder)
+	local button = Instance.new("TextButton")
+	button.Size = UDim2.new(1, 0, 0, 42)
+	button.BackgroundColor3 = COLORS.Input
+	button.BorderSizePixel = 0
+	button.Text = "◆  " .. boulder.Name
+	button.TextColor3 = COLORS.Text
+	button.TextSize = 12
+	button.Font = Enum.Font.GothamMedium
+	button.TextXAlignment = Enum.TextXAlignment.Left
+	button.AutoButtonColor = false
+	button.Parent = boulderScroll
+	addCorner(button, 7)
 
-	local look =
-		root.CFrame.LookVector
+	local buttonPadding = Instance.new("UIPadding")
+	buttonPadding.PaddingLeft = UDim.new(0, 13)
+	buttonPadding.Parent = button
 
+	button.MouseEnter:Connect(function()
+		tween(button, {BackgroundColor3 = COLORS.CardHover})
+	end)
+	button.MouseLeave:Connect(function()
+		tween(button, {BackgroundColor3 = COLORS.Input})
+	end)
+	button.MouseButton1Click:Connect(function()
+		if boulder and boulder.Parent then
+			teleportToBoulder(boulder)
+		end
+	end)
+end
 
-	local flatLook =
-		Vector3.new(
-			look.X,
-			0,
-			look.Z
-		)
+local boulderFolder = workspace:FindFirstChild("Boulders")
+if boulderFolder then
+	for _, obj in ipairs(boulderFolder:GetChildren()) do
+		rememberBoulder(obj)
+	end
+	boulderFolder.ChildAdded:Connect(function(obj)
+		task.wait(0.1)
+		rememberBoulder(obj)
+	end)
+end
 
+local lastBoulderSignature = ""
 
-	if flatLook.Magnitude
-		< 0.01 then
-
-		flatLook =
-			Vector3.new(
-				0,
-				0,
-				-1
-			)
-
+local function updateMiniRadar(root)
+	if not miniRadarFrame then
+		return
+	end
+	if not root or not nearestBoulderPosition or not nearestBoulder then
+		miniRadarArrow.Rotation = 0
+		miniRadarInfo.Text = "No boulder\n-\nX -  Y -  Z -"
+		return
 	end
 
+	local delta = nearestBoulderPosition - root.Position
+	local flatDelta = Vector3.new(delta.X, 0, delta.Z)
+	if flatDelta.Magnitude > 0.01 then
+		local dir = flatDelta.Unit
+		local look = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+		local right = Vector3.new(root.CFrame.RightVector.X, 0, root.CFrame.RightVector.Z)
+		if look.Magnitude > 0.01 and right.Magnitude > 0.01 then
+			local angle = math.deg(math.atan2(dir:Dot(right.Unit), dir:Dot(look.Unit)))
+			miniRadarArrow.Rotation = angle
+		end
+	end
 
-	root.CFrame =
-		CFrame.lookAt(
-
-			target,
-
-			target
-				+ flatLook.Unit
-
-		)
-
-
-	root.AssemblyLinearVelocity =
-		Vector3.zero
-
-end
-
-
---// =========================================================
---// BOULDER BUTTON
---// =========================================================
-
-local function createBoulderButton(
-	boulder
-)
-
-	local button =
-		Instance.new("TextButton")
-
-	button.Size =
-		UDim2.new(
-			1,
-			0,
-			0,
-			42
-		)
-
-	button.BackgroundColor3 =
-		COLORS.Input
-
-	button.BorderSizePixel = 0
-
-	button.Text =
-		"◆  "
-		.. boulder.Name
-
-	button.TextColor3 =
-		COLORS.Text
-
-	button.TextSize = 12
-
-	button.Font =
-		Enum.Font.GothamMedium
-
-	button.TextXAlignment =
-		Enum.TextXAlignment.Left
-
-	button.AutoButtonColor = false
-
-	button.Parent =
-		boulderScroll
-
-	addCorner(
-		button,
-		7
+	miniRadarInfo.Text = string.format(
+		"%s\n%d studs\nX %.0f  Y %.0f  Z %.0f",
+		nearestBoulder.Name,
+		math.floor(nearestBoulderDistance + 0.5),
+		nearestBoulderPosition.X,
+		nearestBoulderPosition.Y,
+		nearestBoulderPosition.Z
 	)
-
-
-	local buttonPadding =
-		Instance.new(
-			"UIPadding"
-		)
-
-	buttonPadding.PaddingLeft =
-		UDim.new(
-			0,
-			13
-		)
-
-	buttonPadding.Parent =
-		button
-
-
-	button.MouseEnter:
-		Connect(function()
-
-			tween(
-				button,
-				{
-					BackgroundColor3 =
-						COLORS.CardHover
-				}
-			)
-
-		end)
-
-
-	button.MouseLeave:
-		Connect(function()
-
-			tween(
-				button,
-				{
-					BackgroundColor3 =
-						COLORS.Input
-				}
-			)
-
-		end)
-
-
-	button.MouseButton1Click:
-		Connect(function()
-
-			if boulder
-				and boulder.Parent then
-
-				teleportToBoulder(
-					boulder
-				)
-
-			end
-
-		end)
-
 end
-
-
---// =========================================================
---// BOULDER REFRESH
---// =========================================================
-
-local lastBoulderSignature =
-	""
-
 
 local function refreshBoulders()
-
-	local folder =
-		workspace:
-			FindFirstChild(
-				"Boulders"
-			)
-
-
+	local folder = workspace:FindFirstChild("Boulders")
 	if not folder then
-
-		boulderStatus.Text =
-			"Folder Boulders tidak ditemukan"
-
+		boulderStatus.Text = "Folder Boulders tidak ditemukan"
+		boulderStatsText.Text = "Ever seen: " .. seenCount .. "    Current: 0\nNearest: None"
 		return
-
 	end
 
-
-	local boulders =
-		folder:GetChildren()
-
-
-	table.sort(
-		boulders,
-
-		function(a, b)
-
-			return
-				a.Name:lower()
-				<
-				b.Name:lower()
-
+	if folder ~= boulderFolder then
+		boulderFolder = folder
+		for _, obj in ipairs(folder:GetChildren()) do
+			rememberBoulder(obj)
 		end
-	)
-
-
-	local signatureParts = {}
-
-
-	for _, boulder
-		in ipairs(boulders) do
-
-		table.insert(
-			signatureParts,
-
-			boulder.Name
-				.. tostring(boulder)
-
-		)
-
+		folder.ChildAdded:Connect(function(obj)
+			task.wait(0.1)
+			rememberBoulder(obj)
+		end)
 	end
 
-
-	local signature =
-		table.concat(
-			signatureParts,
-			"|"
-		)
-
-
-	if signature
-		== lastBoulderSignature then
-
-		boulderStatus.Text =
-			tostring(
-				#boulders
-			)
-			.. " boulders ditemukan"
-
-		return
-
-	end
-
-
-	lastBoulderSignature =
-		signature
-
-
-	for _, child
-		in ipairs(
-			boulderScroll:GetChildren()
-		) do
-
-		if child:IsA(
-			"TextButton"
-		) then
-
-			child:Destroy()
-
-		end
-
-	end
-
-
-	local valid = 0
-
-
-	for _, boulder
-		in ipairs(boulders) do
-
-		if getBoulderTop(
-			boulder
-		) then
-
-			valid += 1
-
-			createBoulderButton(
-				boulder
-			)
-
-		end
-
-	end
-
-
-	boulderStatus.Text =
-		tostring(valid)
-		.. " boulders ditemukan"
-
-end
-
-
-task.spawn(function()
-
-	while true do
-
-		refreshBoulders()
-
-		task.wait(
-			BOULDER_REFRESH_TIME
-		)
-
-	end
-
-end)
-
-
---// =========================================================
---// ANTI AFK - HYBRID
---// =========================================================
-
-local ANTI_AFK_INTERVAL = 45
-
-local function antiAfkPulse()
-
-	local camera = workspace.CurrentCamera
-
-	-- VirtualUser pulse
-	pcall(function()
-
-		VirtualUser:CaptureController()
-
-		VirtualUser:Button2Down(
-			Vector2.new(0, 0),
-			camera and camera.CFrame or CFrame.new()
-		)
-
-		task.wait(0.1)
-
-		VirtualUser:Button2Up(
-			Vector2.new(0, 0),
-			camera and camera.CFrame or CFrame.new()
-		)
-
+	local boulders = folder:GetChildren()
+	table.sort(boulders, function(a, b)
+		return a.Name:lower() < b.Name:lower()
 	end)
 
+	local hidden, revealed = 0, 0
+	local root = getRoot()
+	nearestBoulder = nil
+	nearestBoulderPosition = nil
+	nearestBoulderDistance = math.huge
 
-	-- Humanoid activity pulse
-	-- Sangat kecil supaya tidak mengganggu posisi farming
-	local humanoid = getHumanoid()
-
-	if humanoid then
-
-		pcall(function()
-
-			humanoid:Move(
-				Vector3.new(0.01, 0, 0),
-				false
-			)
-
-			task.wait(0.1)
-
-			humanoid:Move(
-				Vector3.zero,
-				false
-			)
-
-		end)
-
+	local signatureParts = {}
+	for _, boulder in ipairs(boulders) do
+		rememberBoulder(boulder)
+		table.insert(signatureParts, boulder.Name .. tostring(boulder))
+		if boulder:GetAttribute("Revealed") == true then
+			revealed += 1
+		else
+			hidden += 1
+		end
+		if root then
+			local pos = getBoulderPosition(boulder)
+			if pos then
+				local dist = (pos - root.Position).Magnitude
+				if dist < nearestBoulderDistance then
+					nearestBoulderDistance = dist
+					nearestBoulder = boulder
+					nearestBoulderPosition = pos
+				end
+			end
+		end
 	end
 
+	local nearestName = nearestBoulder and nearestBoulder.Name or "None"
+	local nearestDistText = nearestBoulderDistance < math.huge and (math.floor(nearestBoulderDistance + 0.5) .. " studs") or "-"
+	boulderStatsText.Text =
+		"Ever seen: " .. seenCount .. "    Current: " .. #boulders .. "    Hidden: " .. hidden .. "    Revealed: " .. revealed ..
+		"\nNearest: " .. nearestName ..
+		"\nDistance: " .. nearestDistText
+	updateMiniRadar(root)
+
+	local signature = table.concat(signatureParts, "|")
+	if signature == lastBoulderSignature then
+		boulderStatus.Text = tostring(#boulders) .. " boulders ditemukan"
+		return
+	end
+	lastBoulderSignature = signature
+
+	for _, child in ipairs(boulderScroll:GetChildren()) do
+		if child:IsA("TextButton") then
+			child:Destroy()
+		end
+	end
+
+	local valid = 0
+	for _, boulder in ipairs(boulders) do
+		if getBoulderTop(boulder) then
+			valid += 1
+			createBoulderButton(boulder)
+		end
+	end
+	boulderStatus.Text = tostring(valid) .. " boulders ditemukan"
 end
 
-
--- Backup kalau Roblox mendeteksi Idled
-player.Idled:Connect(function()
-
-	antiAfkPulse()
-
+task.spawn(function()
+	while gui.Parent do
+		refreshBoulders()
+		task.wait(0.5)
+	end
 end)
 
 
--- Jangan tunggu Idled:
--- pulse rutin setiap 45 detik
-task.spawn(function()
+--// =========================================================
+--// ANTI AFK - SPACE EVERY 14 MINUTES
+--// =========================================================
 
-	while true do
+local ANTI_AFK_INTERVAL = 14 * 60
 
-		task.wait(ANTI_AFK_INTERVAL)
-
-		antiAfkPulse()
-
+local function antiAfkPulse()
+	local sent = false
+	if VirtualInputManager then
+		local ok = pcall(function()
+			VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+			task.wait(0.08)
+			VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+		end)
+		sent = ok
 	end
+	if not sent then
+		local humanoid = getHumanoid()
+		if humanoid then
+			pcall(function()
+				humanoid.Jump = true
+			end)
+		end
+	end
+end
 
+-- One visible activity pulse every 14 minutes, safely below Roblox's normal idle timeout.
+task.spawn(function()
+	while gui.Parent do
+		task.wait(ANTI_AFK_INTERVAL)
+		antiAfkPulse()
+	end
 end)
 
 --// =========================================================
@@ -3505,11 +3673,370 @@ player.CharacterAdded:
 
 		end
 
+		if ragdollEnabled then
+			ragdollToggle:Set(false)
+			ragdollEnabled = false
+		end
+
 	end)
 
 
 --// =========================================================
 --// START PAGE
 --// =========================================================
+
+--// =========================================================
+--// SMART CRYSTAL FARM V3 (EXPERIMENTAL)
+--// Separate movement controller; does not alter old Fly/Mining toggles.
+--// =========================================================
+local crystalPage = createPage("Crystal")
+createTab("Crystal", "◇", 6)
+createHeader(crystalPage, "Smart Crystal Farm", "Approach > dig surface > interact E (experimental)")
+local smartToggle = createToggle(crystalPage, "Smart Crystal Farm", "Fly menuju crystal yang terdeteksi, gali penghalang", UDim2.fromOffset(16, 88))
+-- Speed slider: click, drag, or swipe left/right (YouTube volume style).
+local SMART_SPEED = 24
+local SMART_MIN_SPEED, SMART_MAX_SPEED = 8, 100
+local speedControl = createCard(crystalPage, UDim2.fromOffset(16, 166), UDim2.new(1, -32, 0, 88))
+local sliderTitle = Instance.new("TextLabel")
+sliderTitle.Position = UDim2.fromOffset(14, 6)
+sliderTitle.Size = UDim2.new(1, -28, 0, 24)
+sliderTitle.BackgroundTransparency = 1
+sliderTitle.TextXAlignment = Enum.TextXAlignment.Left
+sliderTitle.TextColor3 = COLORS.Text
+sliderTitle.Font = Enum.Font.GothamSemibold
+sliderTitle.TextSize = 13
+sliderTitle.Text = "Auto Fly Speed: 24 studs/s"
+sliderTitle.Parent = speedControl
+local sliderTrack = Instance.new("Frame")
+sliderTrack.Active = true
+sliderTrack.Position = UDim2.new(0, 18, 0, 50)
+sliderTrack.Size = UDim2.new(1, -36, 0, 7)
+sliderTrack.BackgroundColor3 = COLORS.Input
+sliderTrack.BorderSizePixel = 0
+sliderTrack.Parent = speedControl
+addCorner(sliderTrack, 6)
+local sliderFill = Instance.new("Frame")
+sliderFill.BackgroundColor3 = COLORS.Accent
+sliderFill.Size = UDim2.fromScale((SMART_SPEED - SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED), 1)
+sliderFill.BorderSizePixel = 0
+sliderFill.Parent = sliderTrack
+addCorner(sliderFill, 6)
+local sliderKnob = Instance.new("TextButton")
+sliderKnob.Size = UDim2.fromOffset(19, 19)
+sliderKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+sliderKnob.Position = UDim2.fromScale(sliderFill.Size.X.Scale, 0.5)
+sliderKnob.Text = ""
+sliderKnob.BackgroundColor3 = COLORS.Text
+sliderKnob.BorderSizePixel = 0
+sliderKnob.Parent = sliderTrack
+addCorner(sliderKnob, 10)
+local sliderDragging = false
+local function setSmartSpeedFromX(screenX)
+    local width = math.max(1, sliderTrack.AbsoluteSize.X)
+    local t = math.clamp((screenX-sliderTrack.AbsolutePosition.X)/width,0,1)
+    SMART_SPEED = math.floor(SMART_MIN_SPEED+(SMART_MAX_SPEED-SMART_MIN_SPEED)*t+0.5)
+    local normalized = (SMART_SPEED-SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED)
+    sliderFill.Size = UDim2.fromScale(normalized,1)
+    sliderKnob.Position = UDim2.fromScale(normalized,0.5)
+    sliderTitle.Text = string.format("Auto Fly Speed: %d studs/s  (8–100)",SMART_SPEED)
+end
+local function beginSlider(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        sliderDragging = true
+        setSmartSpeedFromX(input.Position.X)
+    end
+end
+sliderTrack.InputBegan:Connect(beginSlider)
+sliderKnob.InputBegan:Connect(beginSlider)
+UserInputService.InputChanged:Connect(function(input)
+    if sliderDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        setSmartSpeedFromX(input.Position.X)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then sliderDragging = false end
+end)
+
+local smartCard = createCard(crystalPage, UDim2.fromOffset(16, 264), UDim2.new(1, -32, 0, 110))
+local smartStatus = Instance.new("TextLabel")
+smartStatus.Position = UDim2.fromOffset(12, 12)
+smartStatus.Size = UDim2.new(1, -24, 1, -24)
+smartStatus.BackgroundTransparency = 1
+smartStatus.TextColor3 = COLORS.Text
+smartStatus.Font = Enum.Font.Code
+smartStatus.TextSize = 12
+smartStatus.TextWrapped = true
+smartStatus.TextXAlignment = Enum.TextXAlignment.Left
+smartStatus.TextYAlignment = Enum.TextYAlignment.Top
+smartStatus.Text = "OFF\nExperimental scanner: nama Crystal/Gem/Ore atau ProximityPrompt.\nBelum teruji dengan struktur game ini."
+smartStatus.Parent = smartCard
+
+local SMART_SCAN_RADIUS = 125
+local SMART_STOP_DISTANCE = 5
+local SMART_DIG_RANGE = 8
+local SMART_STUCK_SECONDS = 5
+local SMART_LOCAL_RADIUS = 32 -- target berdekatan dikerjakan sebagai satu cluster
+local SMART_COOLDOWN = 12 -- tunggu sebelum mengunjungi target gagal lagi
+local smartEnabled = false
+local smartVelocity, smartGyro
+local smartTarget, smartTargetSince = nil, 0
+local smartCooldown = {}
+local smartLastScan, smartLastDig, smartLastE = 0, 0, 0
+local smartCount = 0
+local smartLastProgress = 0
+local smartLastHit, smartClosestDistance = nil, math.huge
+local smartApproachStage = 0
+local smartClusterCenter = nil
+local smartKnown = {}
+
+local function smartCleanup()
+    if smartVelocity then smartVelocity:Destroy(); smartVelocity = nil end
+    if smartGyro then smartGyro:Destroy(); smartGyro = nil end
+    local hum = getHumanoid()
+    if hum and not flyEnabled then hum.PlatformStand = false end
+end
+
+local function crystalPart(obj)
+    if not obj or not obj.Parent then return nil end
+    if obj:IsA("BasePart") then return obj end
+    if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true) end
+    return nil
+end
+
+local function crystalCandidate(inst)
+    if player.Character and inst:IsDescendantOf(player.Character) then return false end
+    local name = inst.Name:lower()
+    if (inst:IsA("Model") or inst:IsA("BasePart")) and
+       (name:find("crystal") or name:find("gem") or name:find("ore") or name:find("shard") or name:find("mineral") or name:find("geode")) then return true end
+    if inst:IsA("ProximityPrompt") then
+        local t = (inst.ActionText .. " " .. inst.ObjectText):lower()
+        return t:find("collect") ~= nil or t:find("crystal") ~= nil or t:find("gem") ~= nil or t:find("pick up") ~= nil or t:find("harvest") ~= nil
+    end
+    return false
+end
+
+-- Deduplicate multi-part crystals and prefer targets near previous crystal first.
+local function scanCrystal(root, now)
+    local seen, candidates = {}, {}
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        if crystalCandidate(inst) then
+            local obj = inst:IsA("ProximityPrompt") and inst.Parent or inst
+            local part = crystalPart(obj)
+            if part and not seen[part] and (part.Position-root.Position).Magnitude <= SMART_SCAN_RADIUS then
+                seen[part] = true
+                if not smartCooldown[part] or smartCooldown[part] <= now then
+                    table.insert(candidates, part)
+                end
+            end
+        end
+    end
+    smartCount = #candidates
+    smartKnown = candidates
+    local best, score = nil, math.huge
+    for _, part in ipairs(candidates) do
+        local distance = (part.Position-root.Position).Magnitude
+        local localBonus = smartClusterCenter and (part.Position-smartClusterCenter).Magnitude <= SMART_LOCAL_RADIUS and 35 or 0
+        local cost = distance - localBonus
+        if cost < score then best, score = part, cost end
+    end
+    return best
+end
+
+local function ensureSmartFlight(root)
+    if not smartVelocity or smartVelocity.Parent ~= root then
+        smartCleanup()
+        smartVelocity = Instance.new("BodyVelocity")
+        smartVelocity.Name = "RaineSmartCrystalVelocity"
+        smartVelocity.MaxForce = Vector3.new(1e8, 1e8, 1e8)
+        smartVelocity.P = 6500
+        smartVelocity.Parent = root
+        smartGyro = Instance.new("BodyGyro")
+        smartGyro.Name = "RaineSmartCrystalGyro"
+        smartGyro.MaxTorque = Vector3.new(1e8, 1e8, 1e8)
+        smartGyro.P = 20000
+        smartGyro.Parent = root
+        local hum = getHumanoid()
+        if hum then hum.PlatformStand = true end
+    end
+end
+
+local function rayToCrystal(root, part)
+    local origin = root.Position + Vector3.new(0, 1.3, 0)
+    local direction = part.Position - origin
+    if direction.Magnitude < 0.05 then return nil end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {player.Character}
+    return workspace:Raycast(origin, direction, params)
+end
+
+local function pressCrystalE()
+    if not VirtualInputManager then return false end
+    return pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+        task.delay(0.1, function()
+            pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+        end)
+    end)
+end
+
+local function nearbyCrystalPrompt(part)
+    local prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if not prompt and part.Parent then prompt = part.Parent:FindFirstChildWhichIsA("ProximityPrompt", true) end
+    return prompt
+end
+
+local function chooseSmartTarget(root, now)
+    smartTarget = scanCrystal(root, now)
+    smartTargetSince = now
+    smartLastProgress = now
+    smartApproachStage = 0
+    smartLastHit = nil
+    smartClosestDistance = math.huge
+end
+
+local function skipSmartTarget(now)
+    if smartTarget then
+        smartClusterCenter = smartTarget.Position
+        smartCooldown[smartTarget] = now + SMART_COOLDOWN
+    end
+    smartTarget = nil
+    smartLastScan = 0
+end
+
+smartToggle.OnChanged = function(enabled)
+    if enabled and flyEnabled then
+        smartToggle:Set(false)
+        smartStatus.Text = "Matikan Fly manual sebelum Smart Crystal Farm."
+        return
+    end
+    smartEnabled = enabled
+    smartTarget = nil
+    smartCooldown = {}
+    smartClusterCenter = nil
+    smartApproachStage = 0
+    smartLastScan = 0
+    if not enabled then
+        smartCleanup()
+        smartStatus.Text = "OFF"
+    end
+end
+
+RunService.Heartbeat:Connect(function(dt)
+    if not smartEnabled then return end
+    local root = getRoot()
+    if not root then smartCleanup(); return end
+    if flyEnabled then
+        smartToggle:Set(false)
+        smartEnabled = false
+        smartCleanup()
+        smartStatus.Text = "OFF: Fly manual dinyalakan."
+        return
+    end
+    local now = os.clock()
+    if not smartTarget or not smartTarget.Parent or (smartCooldown[smartTarget] or 0) > now then
+        if now - smartLastScan < 1.25 then return end
+        smartLastScan = now
+        chooseSmartTarget(root, now)
+    end
+    ensureSmartFlight(root)
+    if not smartTarget then
+        smartVelocity.Velocity = Vector3.zero
+        smartStatus.Text = "Scanning...\nRadar game tidak sama dengan scanner Workspace.\nBelum ada target / sedang cooldown."
+        return
+    end
+
+    local delta = smartTarget.Position - root.Position
+    local distance = delta.Magnitude
+    local ray = rayToCrystal(root, smartTarget)
+    local blocked = ray ~= nil and ray.Instance ~= smartTarget
+    local direction = distance > 0.01 and delta.Unit or Vector3.zero
+
+    -- Progress = jarak benar-benar berkurang atau posisi surface hasil raycast bergeser.
+    -- Sedikit jitter tidak cukup untuk reset timer stuck.
+    if distance < smartClosestDistance - 1.2 then
+        smartClosestDistance = distance
+        smartLastProgress = now
+    end
+    if blocked and ray then
+        if smartLastHit and (ray.Position - smartLastHit).Magnitude > 1.5 then
+            smartLastProgress = now
+        end
+        smartLastHit = ray.Position
+    else
+        smartLastHit = nil
+    end
+
+    -- Crystal besar perlu dibuka dari beberapa sudut: setelah 5 detik tanpa progress,
+    -- pindah ke sisi yang berbeda; kalau masih macet, kerjakan crystal tetangga.
+    if now - smartLastProgress >= SMART_STUCK_SECONDS then
+        smartApproachStage += 1
+        smartLastProgress = now
+        smartClosestDistance = distance
+        smartLastHit = nil
+        if smartApproachStage > 2 then
+            skipSmartTarget(now)
+            smartVelocity.Velocity = Vector3.zero
+            smartStatus.Text = "Stuck 5s: ganti crystal nearby, target lama cooldown 12s."
+            return
+        end
+    end
+
+    local goal = smartTarget.Position
+    if smartApproachStage > 0 then
+        local offset = root.Position - smartTarget.Position
+        local flat = Vector3.new(offset.X, 0, offset.Z)
+        if flat.Magnitude < 0.1 then flat = Vector3.new(1, 0, 0) end
+        local side = Vector3.new(-flat.Z, 0, flat.X).Unit
+        local sign = smartApproachStage == 1 and 1 or -1
+        goal = smartTarget.Position + side * (5 * sign) + Vector3.new(0, 2, 0)
+    end
+    local move = goal - root.Position
+    local desiredDistance = blocked and 3.5 or SMART_STOP_DISTANCE
+    local desiredVelocity = move.Magnitude > desiredDistance and move.Unit * math.min(SMART_SPEED, move.Magnitude * 3) or Vector3.zero
+    -- Exponential smoothing: responsive at low speed, no abrupt velocity changes.
+    local alpha = 1 - math.exp(-8 * math.clamp(dt or 0.016, 0, 0.1))
+    smartVelocity.Velocity = smartVelocity.Velocity:Lerp(desiredVelocity, alpha)
+    local flatLook = Vector3.new(delta.X, 0, delta.Z)
+    if flatLook.Magnitude > 0.05 then
+        smartGyro.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
+    end
+
+    if blocked and ray and now - smartLastDig >= 0.13 then
+        local hit = ray.Position
+        if (hit - root.Position).Magnitude <= SMART_DIG_RANGE then
+            local digPos = hit + direction * 0.6
+            digRequest:FireServer(createDigVector(digPos.X, digPos.Y, digPos.Z))
+            smartLastDig = now
+        end
+    elseif not blocked and distance <= SMART_STOP_DISTANCE + 2 and now - smartLastE > 0.65 then
+        local prompt = nearbyCrystalPrompt(smartTarget)
+        if prompt and prompt.Enabled and distance <= prompt.MaxActivationDistance and type(fireproximityprompt) == "function" then
+            pcall(function() fireproximityprompt(prompt) end)
+        else
+            pressCrystalE()
+        end
+        smartLastE = now
+        -- Rotate through nearby crystals instead of pressing E indefinitely on one target.
+        if now - smartTargetSince >= 3 then
+            skipSmartTarget(now)
+            smartStatus.Text = "Collect attempted; switching to nearby crystal..."
+            return
+        end
+    end
+
+    smartStatus.Text = string.format(
+        "Target: %s | Speed: %d\nDistance: %.1f | %s | Nearby: %d\nAngle: %d/2 | Switch in: %.1fs\n%s",
+        smartTarget.Name, SMART_SPEED, distance, blocked and "BLOCKED" or "CLEAR", smartCount,
+        smartApproachStage, math.max(0, SMART_STUCK_SECONDS - (now - smartLastProgress)),
+        blocked and "DIG SURFACE / FLY" or "COLLECT E / NEXT"
+    )
+end)
+
+player.CharacterAdded:Connect(function()
+    smartEnabled = false
+    smartToggle:Set(false)
+    smartCleanup()
+end)
 
 switchPage("Home")
