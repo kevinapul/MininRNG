@@ -3687,16 +3687,157 @@ player.CharacterAdded:
 
 --// =========================================================
 -- Separate function scope prevents the Luau 200-local-register compile error.
+--// =========================================================
+--// V8 INDEPENDENT CRYSTAL COLLECTOR (separate local-register scope)
+--// Works with Climb, Straight, manual movement, or standing still.
+--// =========================================================
+task.spawn(function()
+    local crystalPage = createPage("Crystal Take")
+    createTab("Crystal Take", "◆", 7)
+    createHeader(crystalPage, "Nearby Crystal Collector", "Independent of Explorer • no chase or teleport")
+    local collectorToggle = createToggle(crystalPage, "Auto Take Crystal", "Check nearby crystal and tap E when collectible", UDim2.fromOffset(16,84))
+    local card = createCard(crystalPage, UDim2.fromOffset(16,166), UDim2.new(1,-32,0,174))
+    local line = Instance.new("TextLabel")
+    line.Position=UDim2.fromOffset(12,10);line.Size=UDim2.new(1,-24,0,100)
+    line.BackgroundTransparency=1;line.TextColor3=COLORS.Text
+    line.Font=Enum.Font.Code;line.TextSize=12;line.TextWrapped=true
+    line.TextXAlignment=Enum.TextXAlignment.Left;line.TextYAlignment=Enum.TextYAlignment.Top
+    line.Text="OFF\nRange: 15 studs\nScan every 0.25s\nE cooldown: 0.70s"
+    line.Parent=card
+    local info=Instance.new("TextLabel")
+    info.Position=UDim2.fromOffset(12,119);info.Size=UDim2.new(1,-24,0,40)
+    info.BackgroundTransparency=1;info.TextColor3=COLORS.SubText
+    info.Font=Enum.Font.Gotham;info.TextSize=11;info.TextWrapped=true
+    info.Text="Detects nearby crystal parts and collect prompts. Does not mine or move."
+    info.Parent=card
+    local active=false
+    collectorToggle.OnChanged=function(v) active=v end
+    local scanInterval=.25
+    local keyInterval=.70
+    local radius=15
+    local lastScan=0
+    local lastKey=0
+    local candidates={}
+    local cooldown=setmetatable({}, {__mode="k"})
+    local count=0
+    local taps=0
+    local cursor=0
+    local function relevantName(n)
+        n=tostring(n or ""):lower()
+        return n:find("crystal",1,true) or n:find("gem",1,true) or
+            n:find("shard",1,true) or n:find("mineral",1,true) or
+            n:find("collect",1,true) or n:find("pick up",1,true) or
+            n:find("pickup",1,true)
+    end
+    local function getPrompt(part)
+        local inst=part
+        for _=1,3 do
+            if not inst then break end
+            local pr=inst:FindFirstChildWhichIsA("ProximityPrompt",true)
+            if pr then return pr end
+            inst=inst.Parent
+        end
+    end
+    local function sample()
+        local root=getRoot()
+        if not root then candidates={};return end
+        local params=OverlapParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances={player.Character}
+        params.MaxParts=500
+        local seen={}
+        local found={}
+        for _,part in ipairs(workspace:GetPartBoundsInRadius(root.Position,radius,params)) do
+            local model=part:FindFirstAncestorOfClass("Model")
+            local prompt=getPrompt(part)
+            local named=relevantName(part.Name) or (model and relevantName(model.Name))
+            local promptNamed=prompt and (relevantName(prompt.ActionText) or relevantName(prompt.ObjectText))
+            if named or promptNamed then
+                local key=prompt or part
+                if not seen[key] then
+                    seen[key]=true
+                    local pos=prompt and prompt.Parent and prompt.Parent:IsA("BasePart") and prompt.Parent.Position or part.Position
+                    local d=(pos-root.Position).Magnitude
+                    local range=prompt and math.min(radius,prompt.MaxActivationDistance+1) or 9
+                    if d<=range and (not prompt or prompt.Enabled) then
+                        found[#found+1]={part=part,prompt=prompt,key=key,d=d}
+                    end
+                end
+            end
+        end
+        table.sort(found,function(a,b) return a.d<b.d end)
+        candidates=found
+        count=#found
+    end
+    local function tapE()
+        if not VirtualInputManager then return false end
+        local ok=pcall(function() VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.E,false,game) end)
+        if ok then
+            task.delay(.085,function()
+                pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
+            end)
+        end
+        return ok
+    end
+    RunService.Heartbeat:Connect(function()
+        if not active then return end
+        local now=os.clock()
+        if now-lastScan>=scanInterval then lastScan=now;sample() end
+        if now-lastKey < keyInterval then return end
+        if #candidates==0 then
+            line.Text="SCANNING CRYSTALS\nNearby collectible candidates: 0\nNo movement or E spam"
+            return
+        end
+        local chosen=nil
+        -- Rotate candidates so an uncollectable object won't monopolize presses.
+        for i=1,#candidates do
+            local j=((cursor+i-1)%#candidates)+1
+            local c=candidates[j]
+            if c.part.Parent and (cooldown[c.key] or 0)<=now then
+                chosen=c;cursor=j;break
+            end
+        end
+        if not chosen then return end
+        local worked=false
+        local pr=chosen.prompt
+        if pr and pr.Parent and pr.Enabled then
+            local root=getRoot()
+            local maxDist=pr.MaxActivationDistance
+            local base=pr.Parent:IsA("BasePart") and pr.Parent.Position or chosen.part.Position
+            if root and (root.Position-base).Magnitude <= maxDist then
+                if type(fireproximityprompt)=="function" then
+                    worked=pcall(function() fireproximityprompt(pr) end)
+                else
+                    worked=tapE()
+                end
+            end
+        elseif not pr then
+            worked=tapE()
+        end
+        cooldown[chosen.key]=now+1.5
+        lastKey=now
+        if worked then taps+=1 end
+        line.Text=string.format("%s\nNearby candidates: %d | Attempts: %d\nNearest: %.1f studs | E cooldown %.2fs",worked and "COLLECT ATTEMPT" or "WAITING FOR RANGE / INPUT",count,taps,chosen.d,keyInterval)
+    end)
+end)
+
 task.spawn(function()
 --// SMART MOUNTAIN EXPLORER V4
 --// Local scope: avoids original 200-local-register compiler limit.
 local page = createPage("Explorer")
 createTab("Explorer", "⛏", 6)
-createHeader(page, "Mountain Explorer V6", "Edge-aware sweep, nearby E, habitat altitude, RNG recovery")
+createHeader(page, "Mountain Explorer V8", "Adaptive Climb or Straight Sweep, nearby E, recovery")
 
-local enable = createToggle(page, "Adaptive Mountain Farm", "Sweep + collect while moving; stop climbing at habitat", UDim2.fromOffset(16, 74))
+local enable = createToggle(page, "Adaptive Climb", "For tall mountains: climb toward chosen habitat", UDim2.fromOffset(16, 74))
 local settings = createCard(page, UDim2.fromOffset(16, 151), UDim2.new(1,-32,0,126))
 local speed = 32
+local climbSpeed = 32
+local straightSpeed = 28
+local straightActive = false
+local straightDirection = "Naik"
+local straightNoRockSince = nil
+local straightLevel = nil
+local straightSwitchTime = 0
 local directionRadius = 8
 local EDGE_CONFIRM_SECONDS = 1.2
 local EDGE_RECHECK_INTERVAL = 0.35
@@ -3738,7 +3879,8 @@ knob.BackgroundColor3=COLORS.Text; knob.BorderSizePixel=0; knob.Parent=track; ad
 local sliding=false
 local function updateSpeed(screenX)
     local t=math.clamp((screenX-track.AbsolutePosition.X)/math.max(1,track.AbsoluteSize.X),0,1)
-    speed=math.floor(8+92*t+.5)
+    climbSpeed=math.floor(8+92*t+.5)
+    speed=climbSpeed
     local p=(speed-8)/92; fill.Size=UDim2.fromScale(p,1);knob.Position=UDim2.fromScale(p,.5)
     speedText.Text="Travel speed: "..speed.." studs/s (8–100)"
 end
@@ -3789,10 +3931,63 @@ status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Fon
 local pageScroll=Instance.new("ScrollingFrame")
 pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
 pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
-pageScroll.CanvasSize=UDim2.fromOffset(0,512);pageScroll.Parent=page
+pageScroll.CanvasSize=UDim2.fromOffset(0,790);pageScroll.Parent=page
 for _,child in ipairs(page:GetChildren()) do
     if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
+
+-- Independent straight-line sweep controls. Keep this in the explorer's own function scope.
+local straightCard=createCard(pageScroll,UDim2.fromOffset(16,505),UDim2.new(1,-32,0,232))
+local straightToggle=createToggle(straightCard,"Straight Sweep","Stay level while digging; shift height after 10s without rock",UDim2.fromOffset(16,10))
+local dirLabel=mkLabel(straightCard,"After 10 seconds without rock:",UDim2.fromOffset(16,86),UDim2.fromOffset(240,20),11)
+local dirButton=createActionButton(straightCard,"Direction: Naik ▼",UDim2.new(1,-173,0,81),UDim2.fromOffset(157,30))
+local dirPopup=Instance.new("Frame")
+dirPopup.Size=UDim2.fromOffset(157,67);dirPopup.Position=UDim2.new(1,-173,0,113)
+dirPopup.BackgroundColor3=COLORS.CardHover;dirPopup.Visible=false;dirPopup.ZIndex=140;dirPopup.Parent=straightCard
+addCorner(dirPopup,7)
+for index,opt in ipairs({"Naik","Turun"}) do
+    local b=Instance.new("TextButton")
+    b.Size=UDim2.new(1,-6,0,29);b.Position=UDim2.fromOffset(3,3+(index-1)*31)
+    b.Text=opt;b.TextSize=12;b.TextColor3=COLORS.Text;b.BackgroundColor3=COLORS.Input
+    b.ZIndex=141;b.Parent=dirPopup;addCorner(b,6)
+    b.MouseButton1Click:Connect(function()
+        straightDirection=opt;dirButton.Text="Direction: "..opt.." ▼";dirPopup.Visible=false
+    end)
+end
+dirButton.MouseButton1Click:Connect(function() dirPopup.Visible=not dirPopup.Visible end)
+local straightSpeedText=mkLabel(straightCard,"Straight speed: 28 studs/s",UDim2.fromOffset(16,154),UDim2.new(1,-32,0,20),12)
+local straightTrack=Instance.new("Frame")
+straightTrack.Position=UDim2.fromOffset(20,192);straightTrack.Size=UDim2.new(1,-40,0,8)
+straightTrack.BackgroundColor3=COLORS.Input;straightTrack.Active=true;straightTrack.Parent=straightCard;addCorner(straightTrack,6)
+local straightFill=Instance.new("Frame");straightFill.Size=UDim2.fromScale((straightSpeed-8)/92,1)
+straightFill.BackgroundColor3=COLORS.Accent;straightFill.Parent=straightTrack;addCorner(straightFill,6)
+local straightKnob=Instance.new("TextButton");straightKnob.Text="";straightKnob.Size=UDim2.fromOffset(18,18)
+straightKnob.AnchorPoint=Vector2.new(.5,.5);straightKnob.Position=UDim2.fromScale((straightSpeed-8)/92,.5)
+straightKnob.BackgroundColor3=COLORS.Text;straightKnob.Parent=straightTrack;addCorner(straightKnob,9)
+local draggingStraight=false
+local function setStraightSpeed(x)
+    local t=math.clamp((x-straightTrack.AbsolutePosition.X)/math.max(1,straightTrack.AbsoluteSize.X),0,1)
+    straightSpeed=math.floor(8+92*t+.5)
+    local pct=(straightSpeed-8)/92
+    straightFill.Size=UDim2.fromScale(pct,1);straightKnob.Position=UDim2.fromScale(pct,.5)
+    straightSpeedText.Text="Straight speed: "..straightSpeed.." studs/s (8-100)"
+    if straightActive then speed=straightSpeed end
+end
+local function startStraightSlide(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        draggingStraight=true;setStraightSpeed(input.Position.X)
+    end
+end
+straightTrack.InputBegan:Connect(startStraightSlide)
+straightKnob.InputBegan:Connect(startStraightSlide)
+UserInputService.InputChanged:Connect(function(input)
+    if draggingStraight and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+        setStraightSpeed(input.Position.X)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then draggingStraight=false end
+end)
 
 local flightV,flightG
 local function cleanup()
@@ -4002,6 +4197,11 @@ local function boulderNearby(root)
 end
 
 local function activate(v)
+    if v and straightActive then
+        straightToggle:Set(false)
+        straightActive=false
+    end
+    speed=climbSpeed
     if v and flyEnabled then
         enable:Set(false);status.Text="Turn OFF manual Fly first.";return
     end
@@ -4023,14 +4223,41 @@ local function activate(v)
     end
 end
 enable.OnChanged=activate
+straightToggle.OnChanged=function(v)
+    if v and flyEnabled then
+        straightToggle:Set(false);status.Text="Turn OFF manual Fly first.";return
+    end
+    if v and session.enabled then enable:Set(false);activate(false) end
+    straightActive=v
+    if v then
+        speed=straightSpeed
+        session.phase="EXPLORE";session.sectors={};session.lastSector=nil
+        session.edgeSince=nil;session.edgeLastScan=0;session.edgeFound=false
+        session.lastValid=nil;session.lootTarget=nil;session.baseLatched=false
+        session.lastRock=os.clock();session.lastScan=0;session.lastE=0
+        straightNoRockSince=nil;straightSwitchTime=os.clock()
+        local root=getRoot()
+        if root then
+            straightLevel=root.Position.Y
+            local d=root.CFrame.LookVector
+            local flat=Vector3.new(d.X,0,d.Z)
+            session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
+        end
+    else
+        if not session.enabled then cleanup();status.Text="OFF" end
+    end
+end
 
 RunService.Heartbeat:Connect(function(dt)
-    if not session.enabled then return end
+    if not session.enabled and not straightActive then return end
     local root=getRoot()
     if not root then cleanup();return end
-    if flyEnabled then enable:Set(false);activate(false);return end
+    if flyEnabled then
+        enable:Set(false);straightToggle:Set(false);straightActive=false;activate(false);return
+    end
+    speed=straightActive and straightSpeed or climbSpeed
     local now=os.clock()
-    -- V6: base is a respawn checkpoint. Clear old RNG mountain sectors once per base visit.
+    -- V7: base is a respawn checkpoint. Clear old RNG mountain sectors once per base visit.
     local atBase = checkBase(root)
     if atBase and not session.baseLatched then
         session.baseLatched=true
@@ -4050,6 +4277,7 @@ RunService.Heartbeat:Connect(function(dt)
         status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs | %.0fs\nRNG map memory reset",d,now-session.returnSince)
         if d<15 then
             session.phase="EXPLORE";session.layer=0;resetSector(now,root)
+            if straightActive then straightLevel=root.Position.Y;straightNoRockSince=nil end
             session.lastValid=root.Position;session.lastValidAt=now
             session.heading=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z).Unit
         elseif now-session.returnSince>RETURN_TIMEOUT then
@@ -4066,23 +4294,64 @@ RunService.Heartbeat:Connect(function(dt)
         if flightV then flightV.Velocity=Vector3.zero end
         return
     end
-    -- V6: opportunistic collecting WHILE sweeping (never fly/chase crystal).
-    -- Scan infrequently, and press E at most once every COLLECT_INTERVAL seconds.
-    if now-session.lastScan >= COLLECT_SCAN_INTERVAL then
-        session.lastScan = now
-        session.lootTarget = nearestCollectible(root)
-    end
-    local loot = session.lootTarget
-    if loot and loot.Parent and (loot.Position-root.Position).Magnitude <= 9 then
-        if now-session.lastE >= COLLECT_INTERVAL then
-            collectE(root,loot)
-            session.lastE=now
-            session.lootLast=loot
-            session.lootLastAt=now
-            -- allow other nearby crystals to be checked on the next scan
-            session.seen[loot]=now+1.2
-            session.lootTarget=nil
+    -- V8: crystal collection is controlled by its own independent toggle.
+    -- Both exploration modes only handle navigation/mining.
+    if straightActive then
+        -- Flat sweep: keep the current mining level while surface exists.
+        -- No-rock timer is based on surface detection, not merely position change.
+        local heading=session.heading
+        if heading.Magnitude<.1 then heading=Vector3.new(1,0,0);session.heading=heading end
+        if now-session.edgeLastScan >= .40 then
+            session.edgeLastScan=now
+            local found=surfaceProbe(root,heading,32)
+            session.edgeFound=found
+            if found then
+                straightNoRockSince=nil
+                session.lastValid=root.Position
+            else
+                straightNoRockSince=straightNoRockSince or now
+            end
         end
+        if session.edgeFound then
+            local goal=root.Position+heading*12+Vector3.new(0,math.clamp((straightLevel or root.Position.Y)-root.Position.Y,-4,4),0)
+            flyTowards(root,goal,dt,2)
+            sweepDig(root,now)
+            session.scanMode="STRAIGHT DIGGING"
+        else
+            local alternate=findSurfaceHeading(root)
+            if alternate then
+                session.heading=alternate;session.edgeLastScan=0
+                session.scanMode="TURN TO ROCK"
+                flight(root);flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+            elseif straightNoRockSince and now-straightNoRockSince>=10 then
+                -- 10-second timeout: change layer once and re-scan, avoiding continuous skyward flight.
+                if now-straightSwitchTime>=3 then
+                    straightSwitchTime=now
+                    local step=(straightDirection=="Naik") and 45 or -45
+                    straightLevel=(straightLevel or root.Position.Y)+step
+                    session.edgeLastScan=0
+                    straightNoRockSince=nil
+                end
+            end
+            local target=Vector3.new(root.Position.X,straightLevel or root.Position.Y,root.Position.Z)
+            if math.abs(target.Y-root.Position.Y)>4 then
+                flyTowards(root,target,dt,2)
+                session.scanMode="SHIFT "..string.upper(straightDirection)
+            else
+                flight(root);flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+                session.scanMode="SEARCH SURFACE"
+            end
+        end
+        if knownMountain then
+            local horizontal=Vector3.new(root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z)
+            if horizontal.Magnitude>math.max(600,targetTop*.65) then
+                session.phase="RETURN";session.returnSince=now
+            end
+        end
+        status.Text=string.format("V8 STRAIGHT | Speed %d | %s\n%s | Level %.0f\nNo surface %.1fs | E %.2fs",speed,straightDirection,
+            session.scanMode,straightLevel or root.Position.Y,
+            straightNoRockSince and (now-straightNoRockSince) or 0,COLLECT_INTERVAL)
+        return
     end
     local boulderPos=boulderNearby(root)
     if boulderPos and (boulderPos-root.Position).Magnitude>7 then
@@ -4193,13 +4462,13 @@ RunService.Heartbeat:Connect(function(dt)
     if horizontalOffset.Magnitude>math.max(600,targetTop*.65) then
         session.phase="RETURN";session.returnSince=now
     end
-    status.Text=string.format("V6 SWEEP | Speed %d | E %.2fs\nHeight target %.0f • sectors %d\n%s | %s",speed,COLLECT_INTERVAL,layerGoalY,
+    status.Text=string.format("V8 CLIMB | Speed %d | E %.2fs\nHeight target %.0f • sectors %d\n%s | %s",speed,COLLECT_INTERVAL,layerGoalY,
        (function() local n=0;for _ in pairs(session.sectors) do n+=1 end;return n end)(),
        session.scanMode,knownBase and "Auto return ON" or "Set Base for recovery")
 end)
 player.CharacterAdded:Connect(function()
     cleanup()
-    if session.enabled then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
+    if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
 
 switchPage("Home")
