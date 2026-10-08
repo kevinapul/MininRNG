@@ -3692,12 +3692,16 @@ task.spawn(function()
 --// Local scope: avoids original 200-local-register compiler limit.
 local page = createPage("Explorer")
 createTab("Explorer", "⛏", 6)
-createHeader(page, "Mountain Explorer V4", "Sweep surface + nearby crystal + altitude progression")
+createHeader(page, "Mountain Explorer V5", "Edge-aware sweep + crystal + altitude progression")
 
 local enable = createToggle(page, "Adaptive Mountain Farm", "Sweep terrain, collect nearby, climb layers", UDim2.fromOffset(16, 74))
 local settings = createCard(page, UDim2.fromOffset(16, 151), UDim2.new(1,-32,0,126))
 local speed = 32
 local directionRadius = 8
+local EDGE_CONFIRM_SECONDS = 1.2
+local EDGE_RECHECK_INTERVAL = 0.35
+local SURFACE_SCAN_RANGE = 32
+local SEARCH_STEP_SECONDS = 1.3
 local layerHeight = 65
 local targetTop = 2000 -- approximate target RELATIVE to mountain entrance, not world Y
 local minHeight = 100
@@ -3705,7 +3709,9 @@ local knownBase, knownMountain = nil, nil
 local session = {enabled=false, phase="IDLE", layer=0, heading=Vector3.new(1,0,0), sweepStart=0,
     lastMove=0,lastPos=nil, turnCount=0, lastDig=0,lastScan=0,lastCollect=0,
     lastSector=nil, sectors={}, queue={}, seen={}, progress=0, emptyAt=0, lastRock=0, layerSince=0,
-    lootTarget=nil, lootSince=0, lastE=0, lastBoulderScan=0, boulder=nil, activeSince=0}
+    lootTarget=nil, lootSince=0, lastE=0, lastBoulderScan=0, boulder=nil, activeSince=0,
+    edgeSince=nil, edgeLastScan=0, edgeFound=false, edgeHeading=nil, lastValid=nil, lastValidAt=0,
+    recoverySince=0, scanMode="", emptyStreak=0}
 
 local function mkLabel(parent, txt, pos, size, fs)
     local o=Instance.new("TextLabel")
@@ -3814,6 +3820,56 @@ local function terrainCast(origin,vec)
     p.FilterDescendantsInstances={player.Character,gui};p.IgnoreWater=true
     return workspace:Raycast(origin,vec,p)
 end
+-- Probe the future tunnel volume rather than only the current forward ray.
+-- A ray hit alone does not guarantee the server allows digging there.
+local function surfaceProbe(root, direction, range)
+    local flat = Vector3.new(direction.X, 0, direction.Z)
+    if flat.Magnitude < .01 then return false, 0 end
+    flat = flat.Unit
+    local side = Vector3.new(-flat.Z, 0, flat.X)
+    local start = root.Position
+    local count = 0
+    local nearest = math.huge
+    for _, height in ipairs({-5, 0, 5}) do
+        for _, lateral in ipairs({-5, 0, 5}) do
+            local origin = start + side*lateral + Vector3.new(0,height,0)
+            local hit = terrainCast(origin, flat*(range or SURFACE_SCAN_RANGE))
+            if hit then
+                -- Ignore our own UI, other avatars and small loose loot objects.
+                local obj = hit.Instance
+                local candidate = obj == workspace.Terrain or (obj and obj:IsA("BasePart")
+                    and obj.Anchored and obj.Size.Magnitude >= 10)
+                if candidate then
+                    count += 1
+                    nearest = math.min(nearest, (hit.Position-origin).Magnitude)
+                end
+            end
+        end
+    end
+    return count >= 1, nearest
+end
+
+local function findSurfaceHeading(root)
+    local heading = session.heading
+    if heading.Magnitude < .01 then heading = Vector3.new(1,0,0) end
+    local best, bestScore = nil, -math.huge
+    -- Prefer continuing or turning over a complete U-turn. Scan on demand only.
+    for _, angle in ipairs({0, 35, -35, 70, -70, 110, -110, 180}) do
+        local r = math.rad(angle)
+        local dir = Vector3.new(heading.X*math.cos(r)-heading.Z*math.sin(r), 0,
+            heading.X*math.sin(r)+heading.Z*math.cos(r)).Unit
+        local has, distance = surfaceProbe(root, dir, SURFACE_SCAN_RANGE)
+        if has then
+            local score = 40 - math.abs(angle)*.12 - math.abs(distance-12)*.30
+            local sample = root.Position + dir*24
+            local key = math.floor(sample.X/32)..":"..math.floor(sample.Y/32)..":"..math.floor(sample.Z/32)
+            score -= (session.sectors[key] or 0)*18
+            if score > bestScore then best, bestScore = dir, score end
+        end
+    end
+    return best
+end
+
 local function digSurface(root,vec)
     local hit=terrainCast(root.Position,vec)
     if hit and (hit.Position-root.Position).Magnitude<8 then
@@ -3906,6 +3962,7 @@ local function resetSector(now,root)
     session.lastMove=now
     session.lastRock=now
     session.emptyAt=0
+    session.edgeSince=nil
 end
 local function advanceLayer(now,root)
     session.layer+=1
@@ -3938,6 +3995,8 @@ local function activate(v)
     if v then
         session.phase="EXPLORE"
         session.layer=0;session.sectors={};session.lootTarget=nil
+        session.edgeSince=nil;session.edgeLastScan=0;session.edgeFound=false
+        session.lastValid=nil;session.lastValidAt=0;session.recoverySince=0
         session.lastScan=0;session.lastCollect=0;session.lastRock=os.clock()
         session.sweepStart=os.clock();session.layerSince=os.clock();session.lastPos=nil;session.lastMove=os.clock()
         local r=getRoot()
@@ -3963,6 +4022,7 @@ RunService.Heartbeat:Connect(function(dt)
         status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs\nMining paused at base",d)
         if d<15 then
             session.phase="EXPLORE";session.layer=0;resetSector(now,root)
+            session.lastValid=root.Position;session.lastValidAt=now
         end
         return
     end
@@ -4015,32 +4075,87 @@ RunService.Heartbeat:Connect(function(dt)
         session.sectors[key]=(session.sectors[key] or 0)+1
         session.lastMove=now;session.lastPos=root.Position
     end
+    -- V5: never blindly cruise forward into empty space.
+    -- Check several points across the proposed tunnel before moving.
+    if now-session.edgeLastScan >= EDGE_RECHECK_INTERVAL then
+        session.edgeLastScan=now
+        local has = surfaceProbe(root, session.heading, SURFACE_SCAN_RANGE)
+        session.edgeFound=has
+        if has then
+            session.edgeSince=nil
+            session.lastValid=root.Position
+            session.lastValidAt=now
+        else
+            session.edgeSince=session.edgeSince or now
+        end
+    end
     local direction=session.heading
     if direction.Magnitude<.1 then direction=Vector3.new(1,0,0) end
     local layerGoalY=knownMountain.Y+math.min(targetTop,session.layer*layerHeight)
-    local rise=math.clamp(layerGoalY-root.Position.Y,-10,10)
-    local goal=root.Position+direction*18+Vector3.new(0,rise,0)
-    flyTowards(root,goal,dt,1.5)
-    sweepDig(root,now)
+    local rise=math.clamp(layerGoalY-root.Position.Y,-8,8)
+    if session.edgeFound then
+        session.scanMode="DIGGING"
+        local goal=root.Position+direction*12+Vector3.new(0,rise,0)
+        flyTowards(root,goal,dt,1.5)
+        sweepDig(root,now)
+    elseif session.edgeSince and now-session.edgeSince < EDGE_CONFIRM_SECONDS then
+        session.scanMode="VERIFY EDGE"
+        flight(root)
+        flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero, .4)
+    else
+        local nextHeading=findSurfaceHeading(root)
+        if nextHeading then
+            session.heading=nextHeading
+            session.edgeLastScan=0
+            session.edgeSince=nil
+            session.scanMode="TURN TO ROCK"
+            flight(root)
+            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.55)
+        elseif session.lastValid and (root.Position-session.lastValid).Magnitude>8 then
+            session.scanMode="RETURN LAST ROCK"
+            flyTowards(root,session.lastValid,dt,3)
+            if (root.Position-session.lastValid).Magnitude<5 then
+                session.lastValid=nil
+                session.recoverySince=now
+            end
+        else
+            session.scanMode="SEARCH / CLIMB"
+            flight(root)
+            -- No endless ascent above the configured height. Reset to a known rock if lost.
+            local ceilingY=knownMountain.Y+targetTop
+            if root.Position.Y >= ceilingY then
+                flightV.Velocity=Vector3.zero
+                session.phase="RETURN"
+                session.scanMode="ALTITUDE CEILING / RETURN"
+            else
+                flightV.Velocity=Vector3.new(0,math.min(8,speed*.25),0)
+            end
+            if now-session.recoverySince>SEARCH_STEP_SECONDS then
+                session.recoverySince=now
+                turnHeading()
+                session.edgeLastScan=0
+            end
+        end
+    end
     if not session.lastPos then session.lastPos=root.Position;session.lastMove=now end
     if (root.Position-session.lastPos).Magnitude>12 then session.lastMove=now;session.lastPos=root.Position end
     local repeated=(session.sectors[key] or 0)>3
-    local stuck=(now-session.lastMove)>5
+    local stuck=session.edgeFound and (now-session.lastMove)>5
     local barren=(now-session.lastRock)>9
-    if stuck or repeated or barren then
-        turnHeading();resetSector(now,root)
+    if stuck or (repeated and session.edgeFound) then
+        turnHeading();resetSector(now,root);session.edgeLastScan=0
     end
-    -- Rise a layer periodically or when repeated empty surface; reset heading each layer.
-    if now-session.layerSince>48 or (barren and session.turnCount%3==0 and now-session.layerSince>15) then
+    if now-session.layerSince>48 or (barren and now-session.layerSince>20) then
         advanceLayer(now,root)
+        session.edgeLastScan=0
     end
-    -- Do not force mining when we're far from the mountain region.
-    if (root.Position-knownMountain).Magnitude>math.max(200, targetTop*1.5) then
+    -- Hard safety leash: if too far from entry, route back before resuming dig.
+    if (root.Position-knownMountain).Magnitude>math.max(200,targetTop*1.5) then
         session.phase="RETURN"
     end
     status.Text=string.format("EXPLORE / SWEEP  | Speed %d\nLayer %d • target Y %.0f • sectors %d\n%s | %s",speed,session.layer,layerGoalY,
        (function() local n=0;for _ in pairs(session.sectors) do n+=1 end;return n end)(),
-       barren and "Searching next surface" or "Opening rock",knownBase and "Auto return ON" or "Set Base for recovery")
+       session.scanMode,knownBase and "Auto return ON" or "Set Base for recovery")
 end)
 player.CharacterAdded:Connect(function()
     cleanup()
