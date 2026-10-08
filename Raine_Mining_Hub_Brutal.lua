@@ -3688,357 +3688,363 @@ player.CharacterAdded:
 --// =========================================================
 -- Separate function scope prevents the Luau 200-local-register compile error.
 task.spawn(function()
---// SMART CRYSTAL FARM V3 (EXPERIMENTAL)
---// Separate movement controller; does not alter old Fly/Mining toggles.
---// =========================================================
-local crystalPage = createPage("Crystal")
-createTab("Crystal", "◇", 6)
-createHeader(crystalPage, "Smart Crystal Farm", "Approach > dig surface > interact E (experimental)")
-local smartToggle = createToggle(crystalPage, "Smart Crystal Farm", "Fly menuju crystal yang terdeteksi, gali penghalang", UDim2.fromOffset(16, 88))
--- Speed slider: click, drag, or swipe left/right (YouTube volume style).
-local SMART_SPEED = 24
-local SMART_MIN_SPEED, SMART_MAX_SPEED = 8, 100
-local speedControl = createCard(crystalPage, UDim2.fromOffset(16, 166), UDim2.new(1, -32, 0, 88))
-local sliderTitle = Instance.new("TextLabel")
-sliderTitle.Position = UDim2.fromOffset(14, 6)
-sliderTitle.Size = UDim2.new(1, -28, 0, 24)
-sliderTitle.BackgroundTransparency = 1
-sliderTitle.TextXAlignment = Enum.TextXAlignment.Left
-sliderTitle.TextColor3 = COLORS.Text
-sliderTitle.Font = Enum.Font.GothamSemibold
-sliderTitle.TextSize = 13
-sliderTitle.Text = "Auto Fly Speed: 24 studs/s"
-sliderTitle.Parent = speedControl
-local sliderTrack = Instance.new("Frame")
-sliderTrack.Active = true
-sliderTrack.Position = UDim2.new(0, 18, 0, 50)
-sliderTrack.Size = UDim2.new(1, -36, 0, 7)
-sliderTrack.BackgroundColor3 = COLORS.Input
-sliderTrack.BorderSizePixel = 0
-sliderTrack.Parent = speedControl
-addCorner(sliderTrack, 6)
-local sliderFill = Instance.new("Frame")
-sliderFill.BackgroundColor3 = COLORS.Accent
-sliderFill.Size = UDim2.fromScale((SMART_SPEED - SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED), 1)
-sliderFill.BorderSizePixel = 0
-sliderFill.Parent = sliderTrack
-addCorner(sliderFill, 6)
-local sliderKnob = Instance.new("TextButton")
-sliderKnob.Size = UDim2.fromOffset(19, 19)
-sliderKnob.AnchorPoint = Vector2.new(0.5, 0.5)
-sliderKnob.Position = UDim2.fromScale(sliderFill.Size.X.Scale, 0.5)
-sliderKnob.Text = ""
-sliderKnob.BackgroundColor3 = COLORS.Text
-sliderKnob.BorderSizePixel = 0
-sliderKnob.Parent = sliderTrack
-addCorner(sliderKnob, 10)
-local sliderDragging = false
-local function setSmartSpeedFromX(screenX)
-    local width = math.max(1, sliderTrack.AbsoluteSize.X)
-    local t = math.clamp((screenX-sliderTrack.AbsolutePosition.X)/width,0,1)
-    SMART_SPEED = math.floor(SMART_MIN_SPEED+(SMART_MAX_SPEED-SMART_MIN_SPEED)*t+0.5)
-    local normalized = (SMART_SPEED-SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED)
-    sliderFill.Size = UDim2.fromScale(normalized,1)
-    sliderKnob.Position = UDim2.fromScale(normalized,0.5)
-    sliderTitle.Text = string.format("Auto Fly Speed: %d studs/s  (8–100)",SMART_SPEED)
+--// SMART MOUNTAIN EXPLORER V4
+--// Local scope: avoids original 200-local-register compiler limit.
+local page = createPage("Explorer")
+createTab("Explorer", "⛏", 6)
+createHeader(page, "Mountain Explorer V4", "Sweep surface + nearby crystal + altitude progression")
+
+local enable = createToggle(page, "Adaptive Mountain Farm", "Sweep terrain, collect nearby, climb layers", UDim2.fromOffset(16, 74))
+local settings = createCard(page, UDim2.fromOffset(16, 151), UDim2.new(1,-32,0,126))
+local speed = 32
+local directionRadius = 8
+local layerHeight = 65
+local targetTop = 2000 -- approximate target RELATIVE to mountain entrance, not world Y
+local minHeight = 100
+local knownBase, knownMountain = nil, nil
+local session = {enabled=false, phase="IDLE", layer=0, heading=Vector3.new(1,0,0), sweepStart=0,
+    lastMove=0,lastPos=nil, turnCount=0, lastDig=0,lastScan=0,lastCollect=0,
+    lastSector=nil, sectors={}, queue={}, seen={}, progress=0, emptyAt=0, lastRock=0, layerSince=0,
+    lootTarget=nil, lootSince=0, lastE=0, lastBoulderScan=0, boulder=nil, activeSince=0}
+
+local function mkLabel(parent, txt, pos, size, fs)
+    local o=Instance.new("TextLabel")
+    o.BackgroundTransparency=1; o.Text=txt; o.Position=pos; o.Size=size
+    o.TextColor3=COLORS.Text; o.TextSize=fs or 12; o.Font=Enum.Font.GothamMedium
+    o.TextXAlignment=Enum.TextXAlignment.Left; o.Parent=parent
+    return o
 end
-local function beginSlider(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-        sliderDragging = true
-        setSmartSpeedFromX(input.Position.X)
+local speedText=mkLabel(settings,"Travel speed: 32 studs/s",UDim2.fromOffset(14,6),UDim2.new(1,-28,0,20),12)
+local track=Instance.new("Frame")
+track.Position=UDim2.fromOffset(20,40); track.Size=UDim2.new(1,-40,0,8)
+track.BackgroundColor3=COLORS.Input; track.BorderSizePixel=0; track.Active=true; track.Parent=settings
+addCorner(track,6)
+local fill=Instance.new("Frame"); fill.Size=UDim2.fromScale((speed-8)/92,1)
+fill.BackgroundColor3=COLORS.Accent; fill.BorderSizePixel=0; fill.Parent=track; addCorner(fill,6)
+local knob=Instance.new("TextButton"); knob.Text=""; knob.Size=UDim2.fromOffset(18,18)
+knob.AnchorPoint=Vector2.new(.5,.5); knob.Position=UDim2.fromScale(fill.Size.X.Scale,.5)
+knob.BackgroundColor3=COLORS.Text; knob.BorderSizePixel=0; knob.Parent=track; addCorner(knob,9)
+local sliding=false
+local function updateSpeed(screenX)
+    local t=math.clamp((screenX-track.AbsolutePosition.X)/math.max(1,track.AbsoluteSize.X),0,1)
+    speed=math.floor(8+92*t+.5)
+    local p=(speed-8)/92; fill.Size=UDim2.fromScale(p,1);knob.Position=UDim2.fromScale(p,.5)
+    speedText.Text="Travel speed: "..speed.." studs/s (8–100)"
+end
+local function beginSlide(input)
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then
+        sliding=true; updateSpeed(input.Position.X)
     end
 end
-sliderTrack.InputBegan:Connect(beginSlider)
-sliderKnob.InputBegan:Connect(beginSlider)
+track.InputBegan:Connect(beginSlide);knob.InputBegan:Connect(beginSlide)
 UserInputService.InputChanged:Connect(function(input)
-    if sliderDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-        setSmartSpeedFromX(input.Position.X)
+    if sliding and (input.UserInputType==Enum.UserInputType.MouseMovement or input.UserInputType==Enum.UserInputType.Touch) then
+        updateSpeed(input.Position.X)
     end
 end)
 UserInputService.InputEnded:Connect(function(input)
-    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then sliderDragging = false end
+    if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then sliding=false end
 end)
 
-local smartCard = createCard(crystalPage, UDim2.fromOffset(16, 264), UDim2.new(1, -32, 0, 110))
-local smartStatus = Instance.new("TextLabel")
-smartStatus.Position = UDim2.fromOffset(12, 12)
-smartStatus.Size = UDim2.new(1, -24, 1, -24)
-smartStatus.BackgroundTransparency = 1
-smartStatus.TextColor3 = COLORS.Text
-smartStatus.Font = Enum.Font.Code
-smartStatus.TextSize = 12
-smartStatus.TextWrapped = true
-smartStatus.TextXAlignment = Enum.TextXAlignment.Left
-smartStatus.TextYAlignment = Enum.TextYAlignment.Top
-smartStatus.Text = "OFF\nExperimental scanner: nama Crystal/Gem/Ore atau ProximityPrompt.\nBelum teruji dengan struktur game ini."
-smartStatus.Parent = smartCard
+local reachText=mkLabel(settings,"Target height above mountain entrance (studs):",UDim2.fromOffset(14,65),UDim2.new(1,-28,0,18),11)
+local topBox=Instance.new("TextBox")
+topBox.Position=UDim2.fromOffset(14,88);topBox.Size=UDim2.fromOffset(134,29)
+topBox.BackgroundColor3=COLORS.Input;topBox.TextColor3=COLORS.Text;topBox.TextSize=12
+topBox.ClearTextOnFocus=false;topBox.Text="2000";topBox.Parent=settings;addCorner(topBox,7)
+local heightHint=mkLabel(settings,"2000 default • set per RNG mountain",UDim2.fromOffset(159,88),UDim2.new(1,-170,0,29),10)
+topBox.FocusLost:Connect(function()
+    targetTop=math.clamp(tonumber(topBox.Text) or targetTop,100,30000)
+    topBox.Text=tostring(math.floor(targetTop))
+end)
+local placeCard=createCard(page,UDim2.fromOffset(16,288),UDim2.new(1,-32,0,90))
+local setBase=createActionButton(placeCard,"Set Base",UDim2.new(0,10,0,10),UDim2.new(.5,-15,0,34))
+local setMountain=createActionButton(placeCard,"Set Mountain Entry",UDim2.new(.5,5,0,10),UDim2.new(.5,-15,0,34))
+local marks=mkLabel(placeCard,"Base: unset    Mountain: unset",UDim2.fromOffset(12,52),UDim2.new(1,-24,0,26),10)
+local readRoot = getRoot
+local function updateMarks()
+    marks.Text="Base: "..(knownBase and "saved" or "unset").."   Mountain: "..(knownMountain and "saved" or "unset")
+end
+setBase.MouseButton1Click:Connect(function()
+    local r=readRoot();if r then knownBase=r.Position;updateMarks() end
+end)
+setMountain.MouseButton1Click:Connect(function()
+    local r=readRoot();if r then knownMountain=r.Position; updateMarks() end
+end)
 
-local SMART_SCAN_RADIUS = 125
-local SMART_STOP_DISTANCE = 5
-local SMART_DIG_RANGE = 8
-local SMART_STUCK_SECONDS = 5
-local SMART_LOCAL_RADIUS = 32 -- target berdekatan dikerjakan sebagai satu cluster
-local SMART_COOLDOWN = 12 -- tunggu sebelum mengunjungi target gagal lagi
-local smartEnabled = false
-local smartVelocity, smartGyro
-local smartTarget, smartTargetSince = nil, 0
-local smartCooldown = {}
-local smartLastScan, smartLastDig, smartLastE = 0, 0, 0
-local smartCount = 0
-local smartLastProgress = 0
-local smartLastHit, smartClosestDistance = nil, math.huge
-local smartApproachStage = 0
-local smartClusterCenter = nil
-local smartKnown = {}
-
-local function smartCleanup()
-    if smartVelocity then smartVelocity:Destroy(); smartVelocity = nil end
-    if smartGyro then smartGyro:Destroy(); smartGyro = nil end
-    local hum = getHumanoid()
-    if hum and not flyEnabled then hum.PlatformStand = false end
+-- Compact status for the 440px-wide hub. The page becomes scrollable via its child status panel.
+local statusBox=createCard(page,UDim2.fromOffset(16,389),UDim2.new(1,-32,0,104))
+local status=mkLabel(statusBox,"OFF\nSet Base at spawn, then Mountain Entry at mine.",UDim2.fromOffset(12,8),UDim2.new(1,-24,1,-16),11)
+status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Font=Enum.Font.Code
+local pageScroll=Instance.new("ScrollingFrame")
+pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
+pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
+pageScroll.CanvasSize=UDim2.fromOffset(0,512);pageScroll.Parent=page
+for _,child in ipairs(page:GetChildren()) do
+    if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
 
-local function crystalPart(obj)
-    if not obj or not obj.Parent then return nil end
-    if obj:IsA("BasePart") then return obj end
-    if obj:IsA("Model") then return obj.PrimaryPart or obj:FindFirstChildWhichIsA("BasePart", true) end
-    return nil
+local flightV,flightG
+local function cleanup()
+    if flightV then flightV:Destroy();flightV=nil end
+    if flightG then flightG:Destroy();flightG=nil end
+    local h=getHumanoid();if h and not flyEnabled then h.PlatformStand=false end
 end
-
-local function crystalCandidate(inst)
-    if player.Character and inst:IsDescendantOf(player.Character) then return false end
-    local name = inst.Name:lower()
-    if (inst:IsA("Model") or inst:IsA("BasePart")) and
-       (name:find("crystal") or name:find("gem") or name:find("ore") or name:find("shard") or name:find("mineral") or name:find("geode")) then return true end
-    if inst:IsA("ProximityPrompt") then
-        local t = (inst.ActionText .. " " .. inst.ObjectText):lower()
-        return t:find("collect") ~= nil or t:find("crystal") ~= nil or t:find("gem") ~= nil or t:find("pick up") ~= nil or t:find("harvest") ~= nil
+local function flight(root)
+    if flightV and flightV.Parent==root then return end
+    cleanup()
+    flightV=Instance.new("BodyVelocity"); flightV.Name="RaineExplorerVelocity"
+    flightV.MaxForce=Vector3.new(1e8,1e8,1e8);flightV.P=6500;flightV.Parent=root
+    flightG=Instance.new("BodyGyro");flightG.Name="RaineExplorerGyro"
+    flightG.MaxTorque=Vector3.new(1e8,1e8,1e8);flightG.P=20000;flightG.Parent=root
+    local h=getHumanoid();if h then h.PlatformStand=true end
+end
+local function flyTowards(root,goal,dt,stop)
+    flight(root)
+    local delta=goal-root.Position
+    local mag=delta.Magnitude
+    local wanted=mag>(stop or 2.5) and delta.Unit*math.min(speed,mag*3) or Vector3.zero
+    local a=1-math.exp(-9*math.clamp(dt,0,.1))
+    flightV.Velocity=flightV.Velocity:Lerp(wanted,a)
+    local flat=Vector3.new(delta.X,0,delta.Z)
+    if flat.Magnitude>.1 then flightG.CFrame=CFrame.lookAt(root.Position,root.Position+flat.Unit) end
+    return mag
+end
+local function terrainCast(origin,vec)
+    local p=RaycastParams.new();p.FilterType=Enum.RaycastFilterType.Exclude
+    p.FilterDescendantsInstances={player.Character,gui};p.IgnoreWater=true
+    return workspace:Raycast(origin,vec,p)
+end
+local function digSurface(root,vec)
+    local hit=terrainCast(root.Position,vec)
+    if hit and (hit.Position-root.Position).Magnitude<8 then
+        local h=hit.Position+vec.Unit*.35
+        digRequest:FireServer(createDigVector(h.X,h.Y,h.Z))
+        return true
     end
     return false
 end
-
--- Deduplicate multi-part crystals and prefer targets near previous crystal first.
-local function scanCrystal(root, now)
-    local seen, candidates = {}, {}
-    for _, inst in ipairs(workspace:GetDescendants()) do
+local function sweepDig(root,now)
+    if now-session.lastDig<.10 then return end
+    session.lastDig=now
+    local facing=session.heading
+    if facing.Magnitude<.1 then facing=Vector3.new(1,0,0) end
+    facing=Vector3.new(facing.X,0,facing.Z).Unit
+    local side=Vector3.new(-facing.Z,0,facing.X)
+    -- Rotate through 15 rays over time instead of firing all requests in a single frame.
+    local rays={}
+    for _,h in ipairs({-3,0,3}) do
+        for _,w in ipairs({-5,0,5}) do
+            table.insert(rays,facing*7+side*w+Vector3.new(0,h,0))
+        end
+    end
+    table.insert(rays,side*6);table.insert(rays,-side*6)
+    table.insert(rays,Vector3.new(0,-6,0));table.insert(rays,Vector3.new(0,6,0))
+    local idx=(math.floor(now*10)%#rays)+1
+    if digSurface(root,rays[idx]) then session.lastRock=now end
+end
+local function crystalCandidate(i)
+    if i:IsA("ProximityPrompt") then
+        local n=(i.ActionText.." "..i.ObjectText):lower()
+        return n:find("crystal") or n:find("collect") or n:find("pick up") or n:find("gem")
+    end
+    if not (i:IsA("Model") or i:IsA("BasePart")) then return false end
+    local n=i.Name:lower()
+    return n:find("crystal") or n:find("shard") or n:find("gem") or n:find("mineral")
+end
+local function crystalPart(inst)
+    if inst:IsA("ProximityPrompt") then inst=inst.Parent end
+    if inst:IsA("BasePart") then return inst end
+    if inst:IsA("Model") then return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart",true) end
+end
+local function nearestCollectible(root)
+    local best=nil;local bestDist=13;local seen={}
+    local currentTime=os.clock()
+    for _,inst in ipairs(workspace:GetDescendants()) do
         if crystalCandidate(inst) then
-            local obj = inst:IsA("ProximityPrompt") and inst.Parent or inst
-            local part = crystalPart(obj)
-            if part and not seen[part] and (part.Position-root.Position).Magnitude <= SMART_SCAN_RADIUS then
-                seen[part] = true
-                if not smartCooldown[part] or smartCooldown[part] <= now then
-                    table.insert(candidates, part)
+            local part=crystalPart(inst)
+            if part and not seen[part] and not part:IsDescendantOf(player.Character) and (session.seen[part] or 0)<currentTime then
+                seen[part]=true
+                local dist=(part.Position-root.Position).Magnitude
+                -- Only nearby loot; ignore distant/display crystals (including base showcases).
+                if dist<bestDist and (not knownBase or (part.Position-knownBase).Magnitude>90) then
+                    local cast=terrainCast(root.Position,part.Position-root.Position)
+                    if not cast or cast.Instance==part or cast.Instance:IsDescendantOf(part.Parent) then
+                        best=part;bestDist=dist
+                    end
                 end
             end
         end
     end
-    smartCount = #candidates
-    smartKnown = candidates
-    local best, score = nil, math.huge
-    for _, part in ipairs(candidates) do
-        local distance = (part.Position-root.Position).Magnitude
-        local localBonus = smartClusterCenter and (part.Position-smartClusterCenter).Magnitude <= SMART_LOCAL_RADIUS and 35 or 0
-        local cost = distance - localBonus
-        if cost < score then best, score = part, cost end
-    end
     return best
 end
-
-local function ensureSmartFlight(root)
-    if not smartVelocity or smartVelocity.Parent ~= root then
-        smartCleanup()
-        smartVelocity = Instance.new("BodyVelocity")
-        smartVelocity.Name = "RaineSmartCrystalVelocity"
-        smartVelocity.MaxForce = Vector3.new(1e8, 1e8, 1e8)
-        smartVelocity.P = 6500
-        smartVelocity.Parent = root
-        smartGyro = Instance.new("BodyGyro")
-        smartGyro.Name = "RaineSmartCrystalGyro"
-        smartGyro.MaxTorque = Vector3.new(1e8, 1e8, 1e8)
-        smartGyro.P = 20000
-        smartGyro.Parent = root
-        local hum = getHumanoid()
-        if hum then hum.PlatformStand = true end
-    end
-end
-
-local function rayToCrystal(root, part)
-    local origin = root.Position + Vector3.new(0, 1.3, 0)
-    local direction = part.Position - origin
-    if direction.Magnitude < 0.05 then return nil end
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = {player.Character}
-    return workspace:Raycast(origin, direction, params)
-end
-
-local function pressCrystalE()
-    if not VirtualInputManager then return false end
-    return pcall(function()
-        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-        task.delay(0.1, function()
-            pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game) end)
+local function collectE(root,part)
+    if not part or not part.Parent then return end
+    local prompt=part:FindFirstChildWhichIsA("ProximityPrompt",true)
+    if not prompt and part.Parent then prompt=part.Parent:FindFirstChildWhichIsA("ProximityPrompt",true) end
+    if prompt and prompt.Enabled and (part.Position-root.Position).Magnitude<=prompt.MaxActivationDistance and type(fireproximityprompt)=="function" then
+        pcall(function() fireproximityprompt(prompt) end)
+    elseif VirtualInputManager then
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.E,false,game)
+            task.delay(.09,function() pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.E,false,game) end) end)
         end)
-    end)
-end
-
-local function nearbyCrystalPrompt(part)
-    local prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if not prompt and part.Parent then prompt = part.Parent:FindFirstChildWhichIsA("ProximityPrompt", true) end
-    return prompt
-end
-
-local function chooseSmartTarget(root, now)
-    smartTarget = scanCrystal(root, now)
-    smartTargetSince = now
-    smartLastProgress = now
-    smartApproachStage = 0
-    smartLastHit = nil
-    smartClosestDistance = math.huge
-end
-
-local function skipSmartTarget(now)
-    if smartTarget then
-        smartClusterCenter = smartTarget.Position
-        smartCooldown[smartTarget] = now + SMART_COOLDOWN
-    end
-    smartTarget = nil
-    smartLastScan = 0
-end
-
-smartToggle.OnChanged = function(enabled)
-    if enabled and flyEnabled then
-        smartToggle:Set(false)
-        smartStatus.Text = "Matikan Fly manual sebelum Smart Crystal Farm."
-        return
-    end
-    smartEnabled = enabled
-    smartTarget = nil
-    smartCooldown = {}
-    smartClusterCenter = nil
-    smartApproachStage = 0
-    smartLastScan = 0
-    if not enabled then
-        smartCleanup()
-        smartStatus.Text = "OFF"
     end
 end
+local function sectorKey(pos)
+    return math.floor(pos.X/32)..":"..math.floor(pos.Y/32)..":"..math.floor(pos.Z/32)
+end
+local function turnHeading()
+    session.turnCount+=1
+    local angle=math.rad((session.turnCount%2==0) and 100 or -90)
+    local d=session.heading
+    local out=Vector3.new(d.X*math.cos(angle)-d.Z*math.sin(angle),0,d.X*math.sin(angle)+d.Z*math.cos(angle))
+    session.heading=out.Magnitude>.01 and out.Unit or Vector3.new(1,0,0)
+end
+local function resetSector(now,root)
+    session.sweepStart=now
+    session.lastPos=root.Position
+    session.lastMove=now
+    session.lastRock=now
+    session.emptyAt=0
+end
+local function advanceLayer(now,root)
+    session.layer+=1
+    local maxLayers=math.max(1,math.floor(targetTop/layerHeight))
+    if session.layer>maxLayers then session.layer=math.max(1,math.floor(maxLayers*.45)) end
+    session.sectors={}
+    session.layerSince=now
+    session.turnCount+=1
+    session.heading=Vector3.new(math.cos(session.turnCount*1.57),0,math.sin(session.turnCount*1.57))
+    resetSector(now,root)
+end
+local function checkBase(root)
+    return knownBase and knownMountain
+       and (root.Position-knownBase).Magnitude<65
+       and (root.Position-knownMountain).Magnitude>75
+end
+local function boulderNearby(root)
+    -- Existing Boulder Tracker keeps updating; target only if revealed and near route.
+    if not nearestBoulder or not nearestBoulder.Parent or nearestBoulder:GetAttribute("Revealed")~=true then return nil end
+    local pos=getBoulderPosition(nearestBoulder)
+    if pos and (pos-root.Position).Magnitude<=55 then return pos end
+    return nil
+end
+
+local function activate(v)
+    if v and flyEnabled then
+        enable:Set(false);status.Text="Turn OFF manual Fly first.";return
+    end
+    session.enabled=v
+    if v then
+        session.phase="EXPLORE"
+        session.layer=0;session.sectors={};session.lootTarget=nil
+        session.lastScan=0;session.lastCollect=0;session.lastRock=os.clock()
+        session.sweepStart=os.clock();session.layerSince=os.clock();session.lastPos=nil;session.lastMove=os.clock()
+        local r=getRoot()
+        if r then
+            local dir=r.CFrame.LookVector
+            session.heading=Vector3.new(dir.X,0,dir.Z).Unit
+        end
+    else
+        session.phase="IDLE";cleanup();status.Text="OFF"
+    end
+end
+enable.OnChanged=activate
 
 RunService.Heartbeat:Connect(function(dt)
-    if not smartEnabled then return end
-    local root = getRoot()
-    if not root then smartCleanup(); return end
-    if flyEnabled then
-        smartToggle:Set(false)
-        smartEnabled = false
-        smartCleanup()
-        smartStatus.Text = "OFF: Fly manual dinyalakan."
-        return
-    end
-    local now = os.clock()
-    if not smartTarget or not smartTarget.Parent or (smartCooldown[smartTarget] or 0) > now then
-        if now - smartLastScan < 1.25 then return end
-        smartLastScan = now
-        chooseSmartTarget(root, now)
-    end
-    ensureSmartFlight(root)
-    if not smartTarget then
-        smartVelocity.Velocity = Vector3.zero
-        smartStatus.Text = "Scanning...\nRadar game tidak sama dengan scanner Workspace.\nBelum ada target / sedang cooldown."
-        return
-    end
-
-    local delta = smartTarget.Position - root.Position
-    local distance = delta.Magnitude
-    local ray = rayToCrystal(root, smartTarget)
-    local blocked = ray ~= nil and ray.Instance ~= smartTarget
-    local direction = distance > 0.01 and delta.Unit or Vector3.zero
-
-    -- Progress = jarak benar-benar berkurang atau posisi surface hasil raycast bergeser.
-    -- Sedikit jitter tidak cukup untuk reset timer stuck.
-    if distance < smartClosestDistance - 1.2 then
-        smartClosestDistance = distance
-        smartLastProgress = now
-    end
-    if blocked and ray then
-        if smartLastHit and (ray.Position - smartLastHit).Magnitude > 1.5 then
-            smartLastProgress = now
+    if not session.enabled then return end
+    local root=getRoot()
+    if not root then cleanup();return end
+    if flyEnabled then enable:Set(false);activate(false);return end
+    local now=os.clock()
+    if checkBase(root) then session.phase="RETURN" end
+    if session.phase=="RETURN" then
+        local d=flyTowards(root,knownMountain+Vector3.new(0,12,0),dt,10)
+        status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs\nMining paused at base",d)
+        if d<15 then
+            session.phase="EXPLORE";session.layer=0;resetSector(now,root)
         end
-        smartLastHit = ray.Position
-    else
-        smartLastHit = nil
+        return
     end
-
-    -- Crystal besar perlu dibuka dari beberapa sudut: setelah 5 detik tanpa progress,
-    -- pindah ke sisi yang berbeda; kalau masih macet, kerjakan crystal tetangga.
-    if now - smartLastProgress >= SMART_STUCK_SECONDS then
-        smartApproachStage += 1
-        smartLastProgress = now
-        smartClosestDistance = distance
-        smartLastHit = nil
-        if smartApproachStage > 2 then
-            skipSmartTarget(now)
-            smartVelocity.Velocity = Vector3.zero
-            smartStatus.Text = "Stuck 5s: ganti crystal nearby, target lama cooldown 12s."
+    -- The base waypoint and mountain waypoint are required for reliable AFK recovery.
+    -- If not set, exploration can still run, but auto-return will be unavailable.
+    if not knownMountain then
+        status.Text="Set Mountain Entry first.\nSet Base for hourly reset recovery."
+        if flightV then flightV.Velocity=Vector3.zero end
+        return
+    end
+    if now-session.lastScan>=1.6 then
+        session.lastScan=now
+        session.lootTarget=nearestCollectible(root)
+    end
+    local loot=session.lootTarget
+    if loot and loot.Parent and (loot.Position-root.Position).Magnitude<=15 then
+        if session.phase~="LOOT" then session.lootSince=now end
+        session.phase="LOOT"
+    elseif session.phase=="LOOT" then
+        session.phase="EXPLORE";session.lootTarget=nil
+    end
+    if session.phase=="LOOT" then
+        local distance=flyTowards(root,loot.Position,dt,3.6)
+        if distance<=6 and now-session.lastE>=.55 then
+            collectE(root,loot);session.lastE=now
+        end
+        if now-session.lootSince>2.5 or distance>20 then
+            session.seen[loot]=now+8
+            session.lootTarget=nil;session.phase="EXPLORE";session.lastScan=now+.3
+        end
+        status.Text=string.format("COLLECT NEARBY CRYSTAL\nDistance: %.1f | %.1fs left\nNext: resume sweep",distance,math.max(0,2.5-(now-session.lootSince)))
+        return
+    end
+    local boulderPos=boulderNearby(root)
+    if boulderPos and (boulderPos-root.Position).Magnitude>7 then
+        -- Avoid prolonged chasing: boulder approach only for a bounded period.
+        if session.phase~="BOULDER" then session.activeSince=now end
+        if now-session.activeSince<6 then
+            session.phase="BOULDER"
+            flyTowards(root,boulderPos,dt,4)
+            sweepDig(root,now)
+            status.Text="BOULDER NEARBY\nApproach + open surrounding rock"
             return
         end
     end
-
-    local goal = smartTarget.Position
-    if smartApproachStage > 0 then
-        local offset = root.Position - smartTarget.Position
-        local flat = Vector3.new(offset.X, 0, offset.Z)
-        if flat.Magnitude < 0.1 then flat = Vector3.new(1, 0, 0) end
-        local side = Vector3.new(-flat.Z, 0, flat.X).Unit
-        local sign = smartApproachStage == 1 and 1 or -1
-        goal = smartTarget.Position + side * (5 * sign) + Vector3.new(0, 2, 0)
+    session.phase="EXPLORE"
+    local key=sectorKey(root.Position)
+    if key~=session.lastSector then
+        session.lastSector=key
+        session.sectors[key]=(session.sectors[key] or 0)+1
+        session.lastMove=now;session.lastPos=root.Position
     end
-    local move = goal - root.Position
-    local desiredDistance = blocked and 3.5 or SMART_STOP_DISTANCE
-    local desiredVelocity = move.Magnitude > desiredDistance and move.Unit * math.min(SMART_SPEED, move.Magnitude * 3) or Vector3.zero
-    -- Exponential smoothing: responsive at low speed, no abrupt velocity changes.
-    local alpha = 1 - math.exp(-8 * math.clamp(dt or 0.016, 0, 0.1))
-    smartVelocity.Velocity = smartVelocity.Velocity:Lerp(desiredVelocity, alpha)
-    local flatLook = Vector3.new(delta.X, 0, delta.Z)
-    if flatLook.Magnitude > 0.05 then
-        smartGyro.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
+    local direction=session.heading
+    if direction.Magnitude<.1 then direction=Vector3.new(1,0,0) end
+    local layerGoalY=knownMountain.Y+math.min(targetTop,session.layer*layerHeight)
+    local rise=math.clamp(layerGoalY-root.Position.Y,-10,10)
+    local goal=root.Position+direction*18+Vector3.new(0,rise,0)
+    flyTowards(root,goal,dt,1.5)
+    sweepDig(root,now)
+    if not session.lastPos then session.lastPos=root.Position;session.lastMove=now end
+    if (root.Position-session.lastPos).Magnitude>12 then session.lastMove=now;session.lastPos=root.Position end
+    local repeated=(session.sectors[key] or 0)>3
+    local stuck=(now-session.lastMove)>5
+    local barren=(now-session.lastRock)>9
+    if stuck or repeated or barren then
+        turnHeading();resetSector(now,root)
     end
-
-    if blocked and ray and now - smartLastDig >= 0.13 then
-        local hit = ray.Position
-        if (hit - root.Position).Magnitude <= SMART_DIG_RANGE then
-            local digPos = hit + direction * 0.6
-            digRequest:FireServer(createDigVector(digPos.X, digPos.Y, digPos.Z))
-            smartLastDig = now
-        end
-    elseif not blocked and distance <= SMART_STOP_DISTANCE + 2 and now - smartLastE > 0.65 then
-        local prompt = nearbyCrystalPrompt(smartTarget)
-        if prompt and prompt.Enabled and distance <= prompt.MaxActivationDistance and type(fireproximityprompt) == "function" then
-            pcall(function() fireproximityprompt(prompt) end)
-        else
-            pressCrystalE()
-        end
-        smartLastE = now
-        -- Rotate through nearby crystals instead of pressing E indefinitely on one target.
-        if now - smartTargetSince >= 3 then
-            skipSmartTarget(now)
-            smartStatus.Text = "Collect attempted; switching to nearby crystal..."
-            return
-        end
+    -- Rise a layer periodically or when repeated empty surface; reset heading each layer.
+    if now-session.layerSince>48 or (barren and session.turnCount%3==0 and now-session.layerSince>15) then
+        advanceLayer(now,root)
     end
-
-    smartStatus.Text = string.format(
-        "Target: %s | Speed: %d\nDistance: %.1f | %s | Nearby: %d\nAngle: %d/2 | Switch in: %.1fs\n%s",
-        smartTarget.Name, SMART_SPEED, distance, blocked and "BLOCKED" or "CLEAR", smartCount,
-        smartApproachStage, math.max(0, SMART_STUCK_SECONDS - (now - smartLastProgress)),
-        blocked and "DIG SURFACE / FLY" or "COLLECT E / NEXT"
-    )
+    -- Do not force mining when we're far from the mountain region.
+    if (root.Position-knownMountain).Magnitude>math.max(200, targetTop*1.5) then
+        session.phase="RETURN"
+    end
+    status.Text=string.format("EXPLORE / SWEEP  | Speed %d\nLayer %d • target Y %.0f • sectors %d\n%s | %s",speed,session.layer,layerGoalY,
+       (function() local n=0;for _ in pairs(session.sectors) do n+=1 end;return n end)(),
+       barren and "Searching next surface" or "Opening rock",knownBase and "Auto return ON" or "Set Base for recovery")
 end)
-
 player.CharacterAdded:Connect(function()
-    smartEnabled = false
-    smartToggle:Set(false)
-    smartCleanup()
+    cleanup()
+    if session.enabled then session.phase="RETURN";session.lootTarget=nil end
 end)
 
 switchPage("Home")
