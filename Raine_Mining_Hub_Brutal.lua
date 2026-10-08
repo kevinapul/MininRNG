@@ -3686,14 +3686,78 @@ player.CharacterAdded:
 --// =========================================================
 
 --// =========================================================
---// SMART CRYSTAL FARM V1 (EXPERIMENTAL)
+--// SMART CRYSTAL FARM V3 (EXPERIMENTAL)
 --// Separate movement controller; does not alter old Fly/Mining toggles.
 --// =========================================================
 local crystalPage = createPage("Crystal")
 createTab("Crystal", "◇", 6)
 createHeader(crystalPage, "Smart Crystal Farm", "Approach > dig surface > interact E (experimental)")
 local smartToggle = createToggle(crystalPage, "Smart Crystal Farm", "Fly menuju crystal yang terdeteksi, gali penghalang", UDim2.fromOffset(16, 88))
-local smartCard = createCard(crystalPage, UDim2.fromOffset(16, 170), UDim2.new(1, -32, 0, 170))
+-- Speed slider: click, drag, or swipe left/right (YouTube volume style).
+local SMART_SPEED = 24
+local SMART_MIN_SPEED, SMART_MAX_SPEED = 8, 100
+local speedControl = createCard(crystalPage, UDim2.fromOffset(16, 166), UDim2.new(1, -32, 0, 88))
+local sliderTitle = Instance.new("TextLabel")
+sliderTitle.Position = UDim2.fromOffset(14, 6)
+sliderTitle.Size = UDim2.new(1, -28, 0, 24)
+sliderTitle.BackgroundTransparency = 1
+sliderTitle.TextXAlignment = Enum.TextXAlignment.Left
+sliderTitle.TextColor3 = COLORS.Text
+sliderTitle.Font = Enum.Font.GothamSemibold
+sliderTitle.TextSize = 13
+sliderTitle.Text = "Auto Fly Speed: 24 studs/s"
+sliderTitle.Parent = speedControl
+local sliderTrack = Instance.new("Frame")
+sliderTrack.Active = true
+sliderTrack.Position = UDim2.new(0, 18, 0, 50)
+sliderTrack.Size = UDim2.new(1, -36, 0, 7)
+sliderTrack.BackgroundColor3 = COLORS.Input
+sliderTrack.BorderSizePixel = 0
+sliderTrack.Parent = speedControl
+addCorner(sliderTrack, 6)
+local sliderFill = Instance.new("Frame")
+sliderFill.BackgroundColor3 = COLORS.Accent
+sliderFill.Size = UDim2.fromScale((SMART_SPEED - SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED), 1)
+sliderFill.BorderSizePixel = 0
+sliderFill.Parent = sliderTrack
+addCorner(sliderFill, 6)
+local sliderKnob = Instance.new("TextButton")
+sliderKnob.Size = UDim2.fromOffset(19, 19)
+sliderKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+sliderKnob.Position = UDim2.fromScale(sliderFill.Size.X.Scale, 0.5)
+sliderKnob.Text = ""
+sliderKnob.BackgroundColor3 = COLORS.Text
+sliderKnob.BorderSizePixel = 0
+sliderKnob.Parent = sliderTrack
+addCorner(sliderKnob, 10)
+local sliderDragging = false
+local function setSmartSpeedFromX(screenX)
+    local width = math.max(1, sliderTrack.AbsoluteSize.X)
+    local t = math.clamp((screenX-sliderTrack.AbsolutePosition.X)/width,0,1)
+    SMART_SPEED = math.floor(SMART_MIN_SPEED+(SMART_MAX_SPEED-SMART_MIN_SPEED)*t+0.5)
+    local normalized = (SMART_SPEED-SMART_MIN_SPEED)/(SMART_MAX_SPEED-SMART_MIN_SPEED)
+    sliderFill.Size = UDim2.fromScale(normalized,1)
+    sliderKnob.Position = UDim2.fromScale(normalized,0.5)
+    sliderTitle.Text = string.format("Auto Fly Speed: %d studs/s  (8–100)",SMART_SPEED)
+end
+local function beginSlider(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        sliderDragging = true
+        setSmartSpeedFromX(input.Position.X)
+    end
+end
+sliderTrack.InputBegan:Connect(beginSlider)
+sliderKnob.InputBegan:Connect(beginSlider)
+UserInputService.InputChanged:Connect(function(input)
+    if sliderDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        setSmartSpeedFromX(input.Position.X)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then sliderDragging = false end
+end)
+
+local smartCard = createCard(crystalPage, UDim2.fromOffset(16, 264), UDim2.new(1, -32, 0, 110))
 local smartStatus = Instance.new("TextLabel")
 smartStatus.Position = UDim2.fromOffset(12, 12)
 smartStatus.Size = UDim2.new(1, -24, 1, -24)
@@ -3708,7 +3772,6 @@ smartStatus.Text = "OFF\nExperimental scanner: nama Crystal/Gem/Ore atau Proximi
 smartStatus.Parent = smartCard
 
 local SMART_SCAN_RADIUS = 125
-local SMART_SPEED = 24
 local SMART_STOP_DISTANCE = 5
 local SMART_DIG_RANGE = 8
 local SMART_STUCK_SECONDS = 5
@@ -3744,10 +3807,10 @@ local function crystalCandidate(inst)
     if player.Character and inst:IsDescendantOf(player.Character) then return false end
     local name = inst.Name:lower()
     if (inst:IsA("Model") or inst:IsA("BasePart")) and
-       (name:find("crystal") or name:find("gem") or name:find("ore")) then return true end
+       (name:find("crystal") or name:find("gem") or name:find("ore") or name:find("shard") or name:find("mineral") or name:find("geode")) then return true end
     if inst:IsA("ProximityPrompt") then
         local t = (inst.ActionText .. " " .. inst.ObjectText):lower()
-        return t:find("collect") ~= nil or t:find("crystal") ~= nil or t:find("gem") ~= nil
+        return t:find("collect") ~= nil or t:find("crystal") ~= nil or t:find("gem") ~= nil or t:find("pick up") ~= nil or t:find("harvest") ~= nil
     end
     return false
 end
@@ -3859,7 +3922,7 @@ smartToggle.OnChanged = function(enabled)
     end
 end
 
-RunService.Heartbeat:Connect(function()
+RunService.Heartbeat:Connect(function(dt)
     if not smartEnabled then return end
     local root = getRoot()
     if not root then smartCleanup(); return end
@@ -3879,7 +3942,7 @@ RunService.Heartbeat:Connect(function()
     ensureSmartFlight(root)
     if not smartTarget then
         smartVelocity.Velocity = Vector3.zero
-        smartStatus.Text = "Scanning...\nTidak ada crystal siap ditarget.\nCooldown atau belum terdeteksi."
+        smartStatus.Text = "Scanning...\nRadar game tidak sama dengan scanner Workspace.\nBelum ada target / sedang cooldown."
         return
     end
 
@@ -3930,7 +3993,10 @@ RunService.Heartbeat:Connect(function()
     end
     local move = goal - root.Position
     local desiredDistance = blocked and 3.5 or SMART_STOP_DISTANCE
-    smartVelocity.Velocity = move.Magnitude > desiredDistance and move.Unit * math.min(SMART_SPEED, move.Magnitude * 5) or Vector3.zero
+    local desiredVelocity = move.Magnitude > desiredDistance and move.Unit * math.min(SMART_SPEED, move.Magnitude * 3) or Vector3.zero
+    -- Exponential smoothing: responsive at low speed, no abrupt velocity changes.
+    local alpha = 1 - math.exp(-8 * math.clamp(dt or 0.016, 0, 0.1))
+    smartVelocity.Velocity = smartVelocity.Velocity:Lerp(desiredVelocity, alpha)
     local flatLook = Vector3.new(delta.X, 0, delta.Z)
     if flatLook.Magnitude > 0.05 then
         smartGyro.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
@@ -3960,8 +4026,8 @@ RunService.Heartbeat:Connect(function()
     end
 
     smartStatus.Text = string.format(
-        "Target: %s\nDistance: %.1f | %s\nNearby: %d | Angle: %d/2\nStuck switch in: %.1fs\nActivity: %s",
-        smartTarget.Name, distance, blocked and "BLOCKED" or "CLEAR", smartCount,
+        "Target: %s | Speed: %d\nDistance: %.1f | %s | Nearby: %d\nAngle: %d/2 | Switch in: %.1fs\n%s",
+        smartTarget.Name, SMART_SPEED, distance, blocked and "BLOCKED" or "CLEAR", smartCount,
         smartApproachStage, math.max(0, SMART_STUCK_SECONDS - (now - smartLastProgress)),
         blocked and "DIG SURFACE / FLY" or "COLLECT E / NEXT"
     )
