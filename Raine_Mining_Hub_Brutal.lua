@@ -3688,6 +3688,8 @@ player.CharacterAdded:
 --// =========================================================
 -- Separate function scope prevents the Luau 200-local-register compile error.
 --// =========================================================
+-- V9 shared interaction arbitration, reused by explorer and collector.
+local v9Control = {holdE=false, lootUntil=0}
 --// V8 INDEPENDENT CRYSTAL COLLECTOR (separate local-register scope)
 --// Works with Climb, Straight, manual movement, or standing still.
 --// =========================================================
@@ -3727,7 +3729,7 @@ task.spawn(function()
         return n:find("crystal",1,true) or n:find("gem",1,true) or
             n:find("shard",1,true) or n:find("mineral",1,true) or
             n:find("collect",1,true) or n:find("pick up",1,true) or
-            n:find("pickup",1,true)
+            n:find("pickup",1,true) or n:find("rune",1,true)
     end
     local function getPrompt(part)
         local inst=part
@@ -3780,7 +3782,7 @@ task.spawn(function()
         return ok
     end
     RunService.Heartbeat:Connect(function()
-        if not active then return end
+        if v9Control.holdE or (not active and os.clock()>=v9Control.lootUntil) then return end
         local now=os.clock()
         if now-lastScan>=scanInterval then lastScan=now;sample() end
         if now-lastKey < keyInterval then return end
@@ -3826,7 +3828,7 @@ task.spawn(function()
 --// Local scope: avoids original 200-local-register compiler limit.
 local page = createPage("Explorer")
 createTab("Explorer", "⛏", 6)
-createHeader(page, "Mountain Explorer V8", "Adaptive Climb or Straight Sweep, nearby E, recovery")
+createHeader(page, "Mountain Explorer V9", "Dual navigation + Boulder Priority + Anti-Freeze")
 
 local enable = createToggle(page, "Adaptive Climb", "For tall mountains: climb toward chosen habitat", UDim2.fromOffset(16, 74))
 local settings = createCard(page, UDim2.fromOffset(16, 151), UDim2.new(1,-32,0,126))
@@ -3931,7 +3933,7 @@ status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Fon
 local pageScroll=Instance.new("ScrollingFrame")
 pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
 pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
-pageScroll.CanvasSize=UDim2.fromOffset(0,790);pageScroll.Parent=page
+pageScroll.CanvasSize=UDim2.fromOffset(0,955);pageScroll.Parent=page
 for _,child in ipairs(page:GetChildren()) do
     if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
@@ -3988,6 +3990,27 @@ end)
 UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then draggingStraight=false end
 end)
+
+-- V9 Boulder Priority is independent of Adaptive Climb and Straight Sweep.
+local boulderCard=createCard(pageScroll,UDim2.fromOffset(16,750),UDim2.new(1,-32,0,158))
+local boulderToggle=createToggle(boulderCard,"Boulder Priority","Pause movement, uncover boulder, hold E, loot, resume",UDim2.fromOffset(16,8))
+local boulderInfo=mkLabel(boulderCard,"OFF | searches for revealed boulders every 0.7s",UDim2.fromOffset(16,90),UDim2.new(1,-32,0,54),11)
+boulderInfo.TextWrapped=true
+local boulderEnabled=false
+local boulderState="SEARCH"
+local boulderTarget=nil
+local boulderLastPos=nil
+local boulderStarted=0
+local boulderLastScan=0
+local boulderLootStarted=0
+local boulderNextDig=0
+local boulderRejected=setmetatable({}, {__mode="k"})
+local boulderLastPosition=nil
+local boulderLastMovement=0
+local straightWatchPos=nil
+local straightWatchAt=0
+local straightRecoverStep=0
+boulderToggle.OnChanged=function(v) boulderEnabled=v; if not v then boulderInfo.Text="OFF" end end
 
 local flightV,flightG
 local function cleanup()
@@ -4196,6 +4219,119 @@ local function boulderNearby(root)
     return nil
 end
 
+-- V9 Boulder controller. It is invoked before both navigation modes.
+local function boulderReleaseE()
+    if v9Control.holdE then
+        v9Control.holdE=false
+        if VirtualInputManager then
+            pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
+        end
+    end
+end
+local function boulderHoldE()
+    if v9Control.holdE then return end
+    if not VirtualInputManager then return end
+    local ok=pcall(function() VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.E,false,game) end)
+    v9Control.holdE=ok
+end
+local function boulderFind(root,now)
+    if now-boulderLastScan<.7 then return nil end
+    boulderLastScan=now
+    local folder=workspace:FindFirstChild("Boulders")
+    if not folder then return nil end
+    local best=nil
+    local bestD=600
+    for _,obj in ipairs(folder:GetChildren()) do
+        if obj:GetAttribute("Revealed")==true and (boulderRejected[obj] or 0)<now then
+            local pos=getBoulderPosition(obj)
+            if pos and (pos-root.Position).Magnitude<bestD
+                and (not knownBase or (pos-knownBase).Magnitude>90) then
+                best=obj
+                bestD=(pos-root.Position).Magnitude
+            end
+        end
+    end
+    return best
+end
+local function boulderStartLoot(now)
+    boulderReleaseE()
+    boulderState="LOOT"
+    boulderLootStarted=now
+    v9Control.lootUntil=now+12
+    boulderTarget=nil
+end
+local function boulderStep(root,now,dt)
+    if not boulderEnabled then
+        if boulderState~="SEARCH" then boulderReleaseE() end
+        boulderTarget=nil;boulderState="SEARCH"
+        return false
+    end
+    if boulderState=="LOOT" then
+        flight(root)
+        flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.3)
+        boulderInfo.Text=string.format("LOOT: collect crystal/rune | %.1fs remaining",math.max(0,12-(now-boulderLootStarted)))
+        if now-boulderLootStarted>=12 then
+            boulderState="SEARCH"
+            session.edgeLastScan=0
+            session.lastMove=now
+        end
+        return true
+    end
+    if not boulderTarget then
+        boulderTarget=boulderFind(root,now)
+        if not boulderTarget then boulderInfo.Text="SEARCHING revealed boulders";return false end
+        boulderStarted=now
+        boulderLastMovement=now
+        boulderLastPosition=root.Position
+        boulderState="APPROACH"
+    end
+    if not boulderTarget.Parent or boulderTarget:GetAttribute("Revealed")==false then
+        boulderStartLoot(now)
+        return true
+    end
+    local pos=getBoulderPosition(boulderTarget)
+    if not pos then
+        boulderRejected[boulderTarget]=now+20
+        boulderTarget=nil
+        boulderReleaseE()
+        return false
+    end
+    local distance=(pos-root.Position).Magnitude
+    if boulderLastPosition and (root.Position-boulderLastPosition).Magnitude>3 then
+        boulderLastPosition=root.Position
+        boulderLastMovement=now
+    end
+    if distance>8 then
+        boulderReleaseE()
+        boulderState="APPROACH"
+        -- Aim for a position slightly outside the boulder, not its center.
+        local difference=root.Position-pos
+        local outward=difference.Magnitude>.1 and difference.Unit or Vector3.new(1,0,0)
+        flyTowards(root,pos+outward*5,dt,4)
+        if now-boulderNextDig>.12 then
+            boulderNextDig=now
+            local vec=pos-root.Position
+            if vec.Magnitude>.1 then digSurface(root,vec.Unit*7) end
+        end
+        boulderInfo.Text=string.format("APPROACH + EXPOSE | distance %.1f",distance)
+        -- If targeting fails for too long, skip temporarily, without trapping Explorer.
+        if now-boulderLastMovement>9 or now-boulderStarted>90 then
+            boulderRejected[boulderTarget]=now+25
+            boulderTarget=nil;boulderReleaseE();boulderState="SEARCH"
+        end
+        return true
+    end
+    -- Character in range. Stay stationary and keep E held while boulder exists.
+    boulderState="HOLD"
+    flight(root)
+    flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+    boulderHoldE()
+    boulderInfo.Text=string.format("HOLD E | Boulder remains | %.0fs%s",now-boulderStarted,VirtualInputManager and "" or " | INPUT UNAVAILABLE")
+    -- We cannot reliably read HP without identifying the actual HUD data.
+    -- Periodically recheck if the boulder has moved out of reach.
+    return true
+end
+
 local function activate(v)
     if v and straightActive then
         straightToggle:Set(false)
@@ -4244,14 +4380,14 @@ straightToggle.OnChanged=function(v)
             session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
         end
     else
-        if not session.enabled then cleanup();status.Text="OFF" end
+        if not session.enabled then cleanup();boulderReleaseE();status.Text="OFF" end
     end
 end
 
 RunService.Heartbeat:Connect(function(dt)
-    if not session.enabled and not straightActive then return end
+    if not session.enabled and not straightActive then boulderReleaseE();return end
     local root=getRoot()
-    if not root then cleanup();return end
+    if not root then boulderReleaseE();cleanup();return end
     if flyEnabled then
         enable:Set(false);straightToggle:Set(false);straightActive=false;activate(false);return
     end
@@ -4262,6 +4398,7 @@ RunService.Heartbeat:Connect(function(dt)
     if atBase and not session.baseLatched then
         session.baseLatched=true
         session.phase="RETURN";session.returnSince=now
+        boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
         session.sectors={};session.lastSector=nil;session.layer=0;session.habitatReached=false
         session.lastValid=nil;session.lootTarget=nil;session.edgeLastScan=0;session.edgeSince=nil
     elseif not atBase then
@@ -4294,8 +4431,42 @@ RunService.Heartbeat:Connect(function(dt)
         if flightV then flightV.Velocity=Vector3.zero end
         return
     end
+    -- Priority controller takes over movement only while actively processing a boulder.
+    if boulderStep(root,now,dt) then
+        status.Text="V9 BOULDER | "..boulderState.."\n"..boulderInfo.Text
+        return
+    end
     -- V8: crystal collection is controlled by its own independent toggle.
     -- Both exploration modes only handle navigation/mining.
+    if straightActive then
+        if not straightWatchPos then straightWatchPos=root.Position;straightWatchAt=now end
+        if (root.Position-straightWatchPos).Magnitude>3 then
+            straightWatchPos=root.Position;straightWatchAt=now;straightRecoverStep=0
+        elseif now-straightWatchAt>2 then
+            local elapsed=now-straightWatchAt
+            if elapsed>10 and straightRecoverStep<4 then
+                straightRecoverStep=4
+                straightLevel=(straightLevel or root.Position.Y)+((straightDirection=="Naik") and 100 or -100)
+                session.heading=findSurfaceHeading(root) or -session.heading
+                straightNoRockSince=nil;session.edgeLastScan=0
+            elseif elapsed>6 and straightRecoverStep<3 then
+                straightRecoverStep=3
+                if session.lastValid and (root.Position-session.lastValid).Magnitude>8 then
+                    flyTowards(root,session.lastValid,dt,3)
+                else session.heading=-session.heading end
+                session.edgeLastScan=0
+            elseif elapsed>4 and straightRecoverStep<2 then
+                straightRecoverStep=2
+                session.heading=findSurfaceHeading(root) or -session.heading
+                session.edgeLastScan=0
+            elseif elapsed>2 and straightRecoverStep<1 then
+                straightRecoverStep=1;session.edgeLastScan=0
+            end
+            if straightRecoverStep>=4 then straightWatchAt=now;straightWatchPos=root.Position;straightRecoverStep=0 end
+        end
+    else
+        straightWatchPos=nil;straightRecoverStep=0
+    end
     if straightActive then
         -- Flat sweep: keep the current mining level while surface exists.
         -- No-rock timer is based on surface detection, not merely position change.
@@ -4327,7 +4498,7 @@ RunService.Heartbeat:Connect(function(dt)
                 -- 10-second timeout: change layer once and re-scan, avoiding continuous skyward flight.
                 if now-straightSwitchTime>=3 then
                     straightSwitchTime=now
-                    local step=(straightDirection=="Naik") and 45 or -45
+                    local step=(straightDirection=="Naik") and 100 or -100
                     straightLevel=(straightLevel or root.Position.Y)+step
                     session.edgeLastScan=0
                     straightNoRockSince=nil
@@ -4348,22 +4519,10 @@ RunService.Heartbeat:Connect(function(dt)
                 session.phase="RETURN";session.returnSince=now
             end
         end
-        status.Text=string.format("V8 STRAIGHT | Speed %d | %s\n%s | Level %.0f\nNo surface %.1fs | E %.2fs",speed,straightDirection,
+        status.Text=string.format("V9 STRAIGHT | Speed %d | %s\n%s | Level %.0f\nNo surface %.1fs | E %.2fs",speed,straightDirection,
             session.scanMode,straightLevel or root.Position.Y,
             straightNoRockSince and (now-straightNoRockSince) or 0,COLLECT_INTERVAL)
         return
-    end
-    local boulderPos=boulderNearby(root)
-    if boulderPos and (boulderPos-root.Position).Magnitude>7 then
-        -- Avoid prolonged chasing: boulder approach only for a bounded period.
-        if session.phase~="BOULDER" then session.activeSince=now end
-        if now-session.activeSince<6 then
-            session.phase="BOULDER"
-            flyTowards(root,boulderPos,dt,4)
-            sweepDig(root,now)
-            status.Text="BOULDER NEARBY\nApproach + open surrounding rock"
-            return
-        end
     end
     session.phase="EXPLORE"
     local key=sectorKey(root.Position)
@@ -4462,11 +4621,12 @@ RunService.Heartbeat:Connect(function(dt)
     if horizontalOffset.Magnitude>math.max(600,targetTop*.65) then
         session.phase="RETURN";session.returnSince=now
     end
-    status.Text=string.format("V8 CLIMB | Speed %d | E %.2fs\nHeight target %.0f • sectors %d\n%s | %s",speed,COLLECT_INTERVAL,layerGoalY,
+    status.Text=string.format("V9 CLIMB | Speed %d | E %.2fs\nHeight target %.0f • sectors %d\n%s | %s",speed,COLLECT_INTERVAL,layerGoalY,
        (function() local n=0;for _ in pairs(session.sectors) do n+=1 end;return n end)(),
        session.scanMode,knownBase and "Auto return ON" or "Set Base for recovery")
 end)
 player.CharacterAdded:Connect(function()
+    boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
     cleanup()
     if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
