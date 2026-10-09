@@ -3853,7 +3853,7 @@ local targetTop = 2000 -- desired HABITAT altitude RELATIVE to mountain entry (s
 local HABITAT_BAND = 45 -- once arrived, stay near this height unless surface is absent
 local COLLECT_INTERVAL = 0.85 -- throttle E presses to max one per 0.85 sec
 local COLLECT_SCAN_INTERVAL = 0.8
-local RETURN_TIMEOUT = 45
+local RETURN_TIMEOUT = 180 -- allow up to 3 minutes for base-to-mountain travel after RNG reset
 local minHeight = 100
 local knownBase, knownMountain = nil, nil
 local session = {enabled=false, phase="IDLE", layer=0, heading=Vector3.new(1,0,0), sweepStart=0,
@@ -4423,7 +4423,7 @@ RunService.Heartbeat:Connect(function(dt)
         elseif now-session.returnSince>RETURN_TIMEOUT then
             -- No blind flight indefinitely if mountain entrance moved.
             flight(root);flightV.Velocity=Vector3.zero
-            status.Text="RETURN TIMEOUT: check Mountain Entry\nThe new RNG mountain may have moved."
+            status.Text="RETURN TIMEOUT (180s): check Mountain Entry\nThe new RNG mountain may have moved."
         end
         return
     end
