@@ -3690,6 +3690,7 @@ player.CharacterAdded:
 --// =========================================================
 -- V9 shared interaction arbitration, reused by explorer and collector.
 local v9Control = {holdE=false, lootUntil=0}
+local raineCollectorBridge={get=function() return false end,set=function() end}
 --// V8 INDEPENDENT CRYSTAL COLLECTOR (separate local-register scope)
 --// Works with Climb, Straight, manual movement, or standing still.
 --// =========================================================
@@ -3714,6 +3715,8 @@ task.spawn(function()
     info.Parent=card
     local active=false
     collectorToggle.OnChanged=function(v) active=v end
+    raineCollectorBridge.get=function() return active end
+    raineCollectorBridge.set=function(v) active=v;collectorToggle:Set(v) end
     local scanInterval=.25
     local keyInterval=.70
     local radius=15
@@ -3933,7 +3936,7 @@ status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Fon
 local pageScroll=Instance.new("ScrollingFrame")
 pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
 pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
-pageScroll.CanvasSize=UDim2.fromOffset(0,955);pageScroll.Parent=page
+pageScroll.CanvasSize=UDim2.fromOffset(0,1190);pageScroll.Parent=page
 for _,child in ipairs(page:GetChildren()) do
     if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
@@ -4629,6 +4632,160 @@ player.CharacterAdded:Connect(function()
     boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
     cleanup()
     if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
+end)
+
+
+-- RAINE V9.4 | Per-session config restore and timed private-server rejoin
+-- Uses the same-place Teleport() method validated by the player.
+task.spawn(function()
+    local HS=game:GetService("HttpService")
+    local TS=game:GetService("TeleportService")
+    local FILE="RaineMiningHub_V9_Config.json"
+    local ioOK=type(readfile)=="function" and type(writefile)=="function"
+    local autoRejoin=false
+    local minutes=60
+    local deadline=os.clock()+3600
+    local pending=false
+    local retryAt=0
+    local function packVec(v)
+        return v and {x=v.X,y=v.Y,z=v.Z} or nil
+    end
+    local function unpackVec(v)
+        if type(v)~="table" then return nil end
+        local x,y,z=tonumber(v.x),tonumber(v.y),tonumber(v.z)
+        if x and y and z then return Vector3.new(x,y,z) end
+        return nil
+    end
+    local panel=createCard(pageScroll,UDim2.fromOffset(16,925),UDim2.new(1,-32,0,225))
+    local headline=mkLabel(panel,"V9.4 • Config & Rejoin",UDim2.fromOffset(12,8),UDim2.new(1,-24,0,22),15)
+    local indicator=mkLabel(panel,"Config: "..(ioOK and "ready" or "file APIs unavailable"),UDim2.fromOffset(12,34),UDim2.new(1,-24,0,20),11)
+    local saveButton=createActionButton(panel,"Save Config",UDim2.fromOffset(12,61),UDim2.new(.5,-18,0,32))
+    local loadButton=createActionButton(panel,"Load Config",UDim2.new(.5,6,0,61),UDim2.new(.5,-18,0,32))
+    local rejoinButton=createActionButton(panel,"Auto Rejoin: OFF",UDim2.fromOffset(12,103),UDim2.new(1,-24,0,32))
+    local interval=Instance.new("TextBox")
+    interval.Position=UDim2.fromOffset(12,143)
+    interval.Size=UDim2.fromOffset(68,31)
+    interval.Text="60";interval.ClearTextOnFocus=false;interval.TextSize=13
+    interval.TextColor3=COLORS.Text;interval.BackgroundColor3=COLORS.Input;interval.Parent=panel
+    addCorner(interval,6)
+    local intervalText=mkLabel(panel,"minutes (2–240)",UDim2.fromOffset(90,148),UDim2.new(1,-105,0,20),11)
+    local countdown=mkLabel(panel,"Next rejoin: OFF",UDim2.fromOffset(12,181),UDim2.new(1,-24,0,30),12)
+    local function paint()
+        rejoinButton.Text=autoRejoin and "Auto Rejoin: ON" or "Auto Rejoin: OFF"
+        interval.Text=tostring(minutes)
+    end
+    local function saveConfig()
+        if not ioOK then return false,"readfile/writefile unavailable" end
+        local config={
+            schema=94,base=packVec(knownBase),mountain=packVec(knownMountain),
+            mode=session.enabled and "climb" or (straightActive and "straight" or "off"),
+            climbSpeed=climbSpeed,straightSpeed=straightSpeed,
+            targetTop=targetTop,direction=straightDirection,
+            boulder=boulderEnabled,collector=raineCollectorBridge.get(),
+            autoRejoin=autoRejoin,minutes=minutes
+        }
+        local ok,err=pcall(function() writefile(FILE,HS:JSONEncode(config)) end)
+        return ok,err
+    end
+    local function readConfig()
+        if not ioOK then return nil,"file APIs unavailable" end
+        local ok,result=pcall(function() return HS:JSONDecode(readfile(FILE)) end)
+        if ok and type(result)=="table" then return result end
+        return nil,tostring(result)
+    end
+    local function apply(config)
+        knownBase=unpackVec(config.base)
+        knownMountain=unpackVec(config.mountain)
+        updateMarks()
+        climbSpeed=math.clamp(tonumber(config.climbSpeed) or climbSpeed,8,100)
+        straightSpeed=math.clamp(tonumber(config.straightSpeed) or straightSpeed,8,100)
+        targetTop=math.clamp(tonumber(config.targetTop) or targetTop,100,30000)
+        straightDirection=config.direction=="Turun" and "Turun" or "Naik"
+        local t=(climbSpeed-8)/92
+        fill.Size=UDim2.fromScale(t,1);knob.Position=UDim2.fromScale(t,.5)
+        speedText.Text="Travel speed: "..climbSpeed.." studs/s (8-100)"
+        local u=(straightSpeed-8)/92
+        straightFill.Size=UDim2.fromScale(u,1);straightKnob.Position=UDim2.fromScale(u,.5)
+        straightSpeedText.Text="Straight speed: "..straightSpeed.." studs/s (8-100)"
+        topBox.Text=tostring(math.floor(targetTop))
+        dirButton.Text="Direction: "..straightDirection.." ▼"
+        boulderEnabled=config.boulder==true;boulderToggle:Set(boulderEnabled)
+        raineCollectorBridge.set(config.collector==true)
+        autoRejoin=config.autoRejoin==true
+        minutes=math.clamp(math.floor(tonumber(config.minutes) or 60),2,240)
+        paint()
+        deadline=os.clock()+minutes*60
+    end
+    saveButton.MouseButton1Click:Connect(function()
+        local ok,err=saveConfig()
+        indicator.Text=ok and "Config saved" or ("Save failed: "..tostring(err):sub(1,60))
+    end)
+    loadButton.MouseButton1Click:Connect(function()
+        local config,err=readConfig()
+        if config then apply(config);indicator.Text="Config loaded (settings)" else indicator.Text="Load failed: "..tostring(err):sub(1,60) end
+    end)
+    rejoinButton.MouseButton1Click:Connect(function()
+        autoRejoin=not autoRejoin
+        deadline=os.clock()+minutes*60;paint();saveConfig()
+    end)
+    interval.FocusLost:Connect(function()
+        minutes=math.clamp(math.floor(tonumber(interval.Text) or minutes),2,240)
+        deadline=os.clock()+minutes*60;paint();saveConfig()
+    end)
+    TS.TeleportInitFailed:Connect(function(p,_,msg)
+        if p~=player or not pending then return end
+        pending=false;retryAt=os.clock()+120
+        indicator.Text="Teleport failed: "..tostring(msg):sub(1,65)
+    end)
+    task.defer(function()
+        local config=readConfig()
+        if not config then return end
+        apply(config)
+        local character=player.Character or player.CharacterAdded:Wait()
+        character:WaitForChild("HumanoidRootPart",20)
+        task.wait(2)
+        if config.mode=="climb" then
+            enable:Set(true)
+            if enable.OnChanged then enable.OnChanged(true) end
+        elseif config.mode=="straight" then
+            straightToggle:Set(true)
+            if straightToggle.OnChanged then straightToggle.OnChanged(true) end
+        end
+        indicator.Text="Auto Resume: "..tostring(config.mode)
+        deadline=os.clock()+minutes*60
+    end)
+    task.spawn(function()
+        local lastSave=0
+        while gui.Parent do
+            task.wait(1)
+            local now=os.clock()
+            if now-lastSave>=12 then
+                saveConfig();lastSave=now
+            end
+            if autoRejoin then
+                local left=math.max(0,math.ceil(deadline-now))
+                countdown.Text=string.format("Next rejoin: %02d:%02d",math.floor(left/60),left%60)
+                if left==0 and not pending and now>=retryAt then
+                    local saved=saveConfig()
+                    if not saved then
+                        autoRejoin=false;paint()
+                        indicator.Text="Auto Rejoin paused: save failed"
+                    else
+                        pending=true;indicator.Text="Teleporting to VIP..."
+                        local ok,err=pcall(function()
+                            TS:Teleport(game.PlaceId,player)
+                        end)
+                        if not ok then
+                            pending=false;retryAt=now+120
+                            indicator.Text="Teleport error: "..tostring(err):sub(1,65)
+                        end
+                    end
+                end
+            else
+                countdown.Text="Next rejoin: OFF"
+            end
+        end
+    end)
 end)
 
 switchPage("Home")
