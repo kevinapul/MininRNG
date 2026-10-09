@@ -4407,10 +4407,43 @@ RunService.Heartbeat:Connect(function(dt)
     elseif not atBase then
         session.baseLatched=false
     end
+    -- Mountain RNG may place solid rock before the old entrance waypoint.
+    -- Accept a new mountain surface only after leaving the base zone.
+    local function surroundedByMountain()
+        if not knownBase or (root.Position-knownBase).Magnitude<110 then return false end
+        local directions={
+            Vector3.new(1,0,0),Vector3.new(-1,0,0),
+            Vector3.new(0,0,1),Vector3.new(0,0,-1)
+        }
+        local hits=0
+        for _,dir in ipairs(directions) do
+            local hit=terrainCast(root.Position+Vector3.new(0,2,0),dir*13)
+            if hit then
+                local obj=hit.Instance
+                if obj==workspace.Terrain or (obj and obj:IsA("BasePart") and obj.Anchored and obj.Size.Magnitude>=12) then
+                    hits+=1
+                end
+            end
+        end
+        return hits>=2
+    end
+    local function resumeInMountain()
+        session.phase="EXPLORE";session.layer=0;resetSector(now,root)
+        session.returnBestDistance=nil;session.returnLastProgress=nil
+        if straightActive then straightLevel=root.Position.Y;straightNoRockSince=nil end
+        session.lastValid=root.Position;session.lastValidAt=now
+        local flat=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+        session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
+        status.Text="Mountain surface found - exploration resumed"
+    end
     if session.phase=="RETURN" then
         if not knownMountain then
             status.Text="RETURN FAILED: Save mountain entry first"
             if flightV then flightV.Velocity=Vector3.zero end
+            return
+        end
+        if surroundedByMountain() then
+            resumeInMountain()
             return
         end
         local d=flyTowards(root,knownMountain+Vector3.new(0,12,0),dt,10)
@@ -4422,12 +4455,7 @@ RunService.Heartbeat:Connect(function(dt)
         local stalledFor=now-session.returnLastProgress
         status.Text=string.format("RETURN TO MOUNTAIN | %.0fs\nDistance: %.0f studs | No progress: %.0fs\nWaypoint from saved Mountain Entry",now-session.returnSince,d,stalledFor)
         if d<18 then
-            session.phase="EXPLORE";session.layer=0;resetSector(now,root)
-            session.returnBestDistance=nil;session.returnLastProgress=nil
-            if straightActive then straightLevel=root.Position.Y;straightNoRockSince=nil end
-            session.lastValid=root.Position;session.lastValidAt=now
-            local flat=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
-            session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
+            resumeInMountain()
         elseif stalledFor>25 or now-session.returnSince>RETURN_TIMEOUT then
             -- Do not keep treating this as a working return path.
             -- Stop safely and show actual distance and progress information.
@@ -4438,6 +4466,10 @@ RunService.Heartbeat:Connect(function(dt)
         return
     end
     if session.phase=="RETURN_PAUSED" then
+        if surroundedByMountain() then
+            resumeInMountain()
+            return
+        end
         if flightV then flightV.Velocity=Vector3.zero end
         -- Return resumes when player comes back to base (new attempt) or
         -- manually saves a new mountain waypoint.
