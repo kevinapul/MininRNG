@@ -3936,7 +3936,7 @@ status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Fon
 local pageScroll=Instance.new("ScrollingFrame")
 pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
 pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
-pageScroll.CanvasSize=UDim2.fromOffset(0,1190);pageScroll.Parent=page
+pageScroll.CanvasSize=UDim2.fromOffset(0,1270);pageScroll.Parent=page
 for _,child in ipairs(page:GetChildren()) do
     if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
@@ -4664,6 +4664,8 @@ task.spawn(function()
     local deadline=os.clock()+3600
     local pending=false
     local retryAt=0
+    local configReady=false
+    local autosaveEnabled=false
     local function packVec(v)
         return v and {x=v.X,y=v.Y,z=v.Z} or nil
     end
@@ -4673,20 +4675,21 @@ task.spawn(function()
         if x and y and z then return Vector3.new(x,y,z) end
         return nil
     end
-    local panel=createCard(pageScroll,UDim2.fromOffset(16,925),UDim2.new(1,-32,0,225))
-    local headline=mkLabel(panel,"V9.4 • Config & Rejoin",UDim2.fromOffset(12,8),UDim2.new(1,-24,0,22),15)
+    local panel=createCard(pageScroll,UDim2.fromOffset(16,925),UDim2.new(1,-32,0,294))
+    local headline=mkLabel(panel,"V9.5 • Config & Rejoin",UDim2.fromOffset(12,8),UDim2.new(1,-24,0,22),15)
     local indicator=mkLabel(panel,"Config: "..(ioOK and "ready" or "file APIs unavailable"),UDim2.fromOffset(12,34),UDim2.new(1,-24,0,20),11)
     local saveButton=createActionButton(panel,"Save Config",UDim2.fromOffset(12,61),UDim2.new(.5,-18,0,32))
     local loadButton=createActionButton(panel,"Load Config",UDim2.new(.5,6,0,61),UDim2.new(.5,-18,0,32))
-    local rejoinButton=createActionButton(panel,"Auto Rejoin: OFF",UDim2.fromOffset(12,103),UDim2.new(1,-24,0,32))
+    local deleteButton=createActionButton(panel,"DELETE CONFIG",UDim2.fromOffset(12,103),UDim2.new(1,-24,0,32))
+    local rejoinButton=createActionButton(panel,"Auto Rejoin: OFF",UDim2.fromOffset(12,145),UDim2.new(1,-24,0,32))
     local interval=Instance.new("TextBox")
-    interval.Position=UDim2.fromOffset(12,143)
+    interval.Position=UDim2.fromOffset(12,185)
     interval.Size=UDim2.fromOffset(68,31)
     interval.Text="60";interval.ClearTextOnFocus=false;interval.TextSize=13
     interval.TextColor3=COLORS.Text;interval.BackgroundColor3=COLORS.Input;interval.Parent=panel
     addCorner(interval,6)
-    local intervalText=mkLabel(panel,"minutes (2–240)",UDim2.fromOffset(90,148),UDim2.new(1,-105,0,20),11)
-    local countdown=mkLabel(panel,"Next rejoin: OFF",UDim2.fromOffset(12,181),UDim2.new(1,-24,0,30),12)
+    local intervalText=mkLabel(panel,"minutes (2–240)",UDim2.fromOffset(90,190),UDim2.new(1,-105,0,20),11)
+    local countdown=mkLabel(panel,"Next rejoin: OFF",UDim2.fromOffset(12,223),UDim2.new(1,-24,0,30),12)
     local function paint()
         rejoinButton.Text=autoRejoin and "Auto Rejoin: ON" or "Auto Rejoin: OFF"
         interval.Text=tostring(minutes)
@@ -4699,15 +4702,19 @@ task.spawn(function()
             climbSpeed=climbSpeed,straightSpeed=straightSpeed,
             targetTop=targetTop,direction=straightDirection,
             boulder=boulderEnabled,collector=raineCollectorBridge.get(),
-            autoRejoin=autoRejoin,minutes=minutes
+            autoRejoin=autoRejoin,minutes=minutes,
+            autoBuyRadar=autoBuyRadarEnabled,autoBuyBomb=autoBuyBombEnabled,
+            selectedRadars=selectedRadars,selectedBombs=selectedBombs,
+            savedAt=os.time()
         }
         local ok,err=pcall(function() writefile(FILE,HS:JSONEncode(config)) end)
+        if ok then autosaveEnabled=true end
         return ok,err
     end
     local function readConfig()
         if not ioOK then return nil,"file APIs unavailable" end
         local ok,result=pcall(function() return HS:JSONDecode(readfile(FILE)) end)
-        if ok and type(result)=="table" then return result end
+        if ok and type(result)=="table" and not result.deleted then return result end
         return nil,tostring(result)
     end
     local function apply(config)
@@ -4728,6 +4735,19 @@ task.spawn(function()
         dirButton.Text="Direction: "..straightDirection.." ▼"
         boulderEnabled=config.boulder==true;boulderToggle:Set(boulderEnabled)
         raineCollectorBridge.set(config.collector==true)
+        table.clear(selectedRadars);table.clear(selectedBombs)
+        for k,v in pairs(type(config.selectedRadars)=="table" and config.selectedRadars or {}) do
+            if type(k)=="string" and v==true then selectedRadars[k]=true end
+        end
+        for k,v in pairs(type(config.selectedBombs)=="table" and config.selectedBombs or {}) do
+            if type(k)=="string" and v==true then selectedBombs[k]=true end
+        end
+        updateMultiDropdownText(radarDropdown,selectedRadars,"radar")
+        updateMultiDropdownText(bombDropdown,selectedBombs,"bomb")
+        radarToggle:Set(config.autoBuyRadar==true)
+        bombToggle:Set(config.autoBuyBomb==true)
+        if radarToggle.OnChanged then radarToggle.OnChanged(config.autoBuyRadar==true) end
+        if bombToggle.OnChanged then bombToggle.OnChanged(config.autoBuyBomb==true) end
         autoRejoin=config.autoRejoin==true
         minutes=math.clamp(math.floor(tonumber(config.minutes) or 60),2,240)
         paint()
@@ -4735,11 +4755,25 @@ task.spawn(function()
     end
     saveButton.MouseButton1Click:Connect(function()
         local ok,err=saveConfig()
-        indicator.Text=ok and "Config saved" or ("Save failed: "..tostring(err):sub(1,60))
+        indicator.Text=ok and "Config overwritten + saved" or ("Save failed: "..tostring(err):sub(1,60))
+    end)
+    deleteButton.MouseButton1Click:Connect(function()
+        autosaveEnabled=false
+        if not ioOK then indicator.Text="Delete unavailable: file APIs missing";return end
+        local removed=false
+        if type(delfile)=="function" then
+            removed=pcall(function() delfile(FILE) end)
+        end
+        if not removed then
+            removed=pcall(function()
+                writefile(FILE,HS:JSONEncode({deleted=true,schema=95,autoResume=false}))
+            end)
+        end
+        indicator.Text=removed and "Config deleted. Autosave OFF until Save." or "Delete failed"
     end)
     loadButton.MouseButton1Click:Connect(function()
         local config,err=readConfig()
-        if config then apply(config);indicator.Text="Config loaded (settings)" else indicator.Text="Load failed: "..tostring(err):sub(1,60) end
+        if config then apply(config);autosaveEnabled=true;indicator.Text="Config loaded (settings)" else indicator.Text="Load failed: "..tostring(err):sub(1,60) end
     end)
     rejoinButton.MouseButton1Click:Connect(function()
         autoRejoin=not autoRejoin
@@ -4756,7 +4790,7 @@ task.spawn(function()
     end)
     task.defer(function()
         local config=readConfig()
-        if not config then return end
+        if not config then configReady=true;return end
         apply(config)
         local character=player.Character or player.CharacterAdded:Wait()
         character:WaitForChild("HumanoidRootPart",20)
@@ -4769,6 +4803,7 @@ task.spawn(function()
             if straightToggle.OnChanged then straightToggle.OnChanged(true) end
         end
         indicator.Text="Auto Resume: "..tostring(config.mode)
+        autosaveEnabled=true;configReady=true
         deadline=os.clock()+minutes*60
     end)
     task.spawn(function()
@@ -4776,7 +4811,7 @@ task.spawn(function()
         while gui.Parent do
             task.wait(1)
             local now=os.clock()
-            if now-lastSave>=12 then
+            if configReady and autosaveEnabled and now-lastSave>=12 then
                 saveConfig();lastSave=now
             end
             if autoRejoin then
