@@ -3926,7 +3926,7 @@ setBase.MouseButton1Click:Connect(function()
     local r=readRoot();if r then knownBase=r.Position; session.baseLatched=false;updateMarks() end
 end)
 setMountain.MouseButton1Click:Connect(function()
-    local r=readRoot();if r then knownMountain=r.Position; session.sectors={};session.layer=0;session.lastValid=nil; updateMarks() end
+    local r=readRoot();if r then knownMountain=r.Position; if session.phase=="RETURN_PAUSED" then session.phase="EXPLORE" end; session.sectors={};session.layer=0;session.lastValid=nil; updateMarks() end
 end)
 
 -- Compact status for the 440px-wide hub. The page becomes scrollable via its child status panel.
@@ -4400,7 +4400,7 @@ RunService.Heartbeat:Connect(function(dt)
     local atBase = checkBase(root)
     if atBase and not session.baseLatched then
         session.baseLatched=true
-        session.phase="RETURN";session.returnSince=now
+        session.phase="RETURN";session.returnSince=now;session.returnBestDistance=nil;session.returnLastProgress=now
         boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
         session.sectors={};session.lastSector=nil;session.layer=0;session.habitatReached=false
         session.lastValid=nil;session.lootTarget=nil;session.edgeLastScan=0;session.edgeSince=nil
@@ -4414,17 +4414,34 @@ RunService.Heartbeat:Connect(function(dt)
             return
         end
         local d=flyTowards(root,knownMountain+Vector3.new(0,12,0),dt,10)
-        status.Text=string.format("RETURN TO MOUNTAIN\nDistance: %.0f studs | %.0fs\nRNG map memory reset",d,now-session.returnSince)
-        if d<15 then
+        if not session.returnBestDistance or d < session.returnBestDistance-3 then
+            session.returnBestDistance=d
+            session.returnLastProgress=now
+        end
+        if not session.returnLastProgress then session.returnLastProgress=now end
+        local stalledFor=now-session.returnLastProgress
+        status.Text=string.format("RETURN TO MOUNTAIN | %.0fs\nDistance: %.0f studs | No progress: %.0fs\nWaypoint from saved Mountain Entry",now-session.returnSince,d,stalledFor)
+        if d<18 then
             session.phase="EXPLORE";session.layer=0;resetSector(now,root)
+            session.returnBestDistance=nil;session.returnLastProgress=nil
             if straightActive then straightLevel=root.Position.Y;straightNoRockSince=nil end
             session.lastValid=root.Position;session.lastValidAt=now
-            session.heading=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z).Unit
-        elseif now-session.returnSince>RETURN_TIMEOUT then
-            -- No blind flight indefinitely if mountain entrance moved.
+            local flat=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+            session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
+        elseif stalledFor>25 or now-session.returnSince>RETURN_TIMEOUT then
+            -- Do not keep treating this as a working return path.
+            -- Stop safely and show actual distance and progress information.
             flight(root);flightV.Velocity=Vector3.zero
-            status.Text="RETURN TIMEOUT (180s): check Mountain Entry\nThe new RNG mountain may have moved."
+            session.phase="RETURN_PAUSED"
+            status.Text=string.format("RETURN PAUSED | %.0f studs away\n%s\nReset Mountain Entry if RNG moved",d,stalledFor>25 and "No progress for 25s" or "Travel exceeded 180s")
         end
+        return
+    end
+    if session.phase=="RETURN_PAUSED" then
+        if flightV then flightV.Velocity=Vector3.zero end
+        -- Return resumes when player comes back to base (new attempt) or
+        -- manually saves a new mountain waypoint.
+        status.Text="RETURN PAUSED: waypoint not reached\nSet Mountain Entry again or return to Base."
         return
     end
     -- The base waypoint and mountain waypoint are required for reliable AFK recovery.
@@ -4631,7 +4648,7 @@ end)
 player.CharacterAdded:Connect(function()
     boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
     cleanup()
-    if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
+    if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.returnBestDistance=nil;session.returnLastProgress=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
 
 
