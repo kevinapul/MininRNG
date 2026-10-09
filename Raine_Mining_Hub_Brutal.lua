@@ -4446,7 +4446,11 @@ RunService.Heartbeat:Connect(function(dt)
             resumeInMountain()
             return
         end
+        -- Dedicated return travel speed; do not change Climb/Straight sliders.
+        local farmingSpeed=speed
+        speed=100
         local d=flyTowards(root,knownMountain+Vector3.new(0,12,0),dt,10)
+        speed=farmingSpeed
         if not session.returnBestDistance or d < session.returnBestDistance-3 then
             session.returnBestDistance=d
             session.returnLastProgress=now
