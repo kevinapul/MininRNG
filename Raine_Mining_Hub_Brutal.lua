@@ -4887,6 +4887,7 @@ task.spawn(function()
     end)
     task.spawn(function()
         local lastSave=0
+        local alignedStraightStart=nil
         while gui.Parent do
             task.wait(1)
             local now=os.clock()
@@ -4894,6 +4895,12 @@ task.spawn(function()
                 saveConfig();lastSave=now
             end
             if autoRejoin then
+                -- Align the configured rejoin interval with actual mountain farming,
+                -- not the travel/loading time before Straight Sweep first starts.
+                if straightActive and straightCycleStart and not alignedStraightStart then
+                    alignedStraightStart=straightCycleStart
+                    deadline=straightCycleStart+minutes*60
+                end
                 local left=math.max(0,math.ceil(deadline-now))
                 countdown.Text=string.format("Next rejoin: %02d:%02d",math.floor(left/60),left%60)
                 if left==0 and not pending and now>=retryAt then
