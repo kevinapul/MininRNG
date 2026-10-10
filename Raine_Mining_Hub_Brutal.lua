@@ -3843,6 +3843,16 @@ local straightDirection = "Naik"
 local straightNoRockSince = nil
 local straightLevel = nil
 local straightSwitchTime = 0
+-- Six 10-minute Straight Sweep cycles. Each cycle reserves its last minute for vertical mining.
+local STRAIGHT_CYCLE_SECONDS = 600
+local STRAIGHT_SHIFT_START = 540
+local STRAIGHT_STEP = 100
+local straightCycleStart, straightStartLevel = nil, nil
+local straightCycleIndex, straightPhase = 0, "WAIT"
+local function resetStraightSchedule()
+    straightCycleStart=nil;straightStartLevel=nil
+    straightCycleIndex=0;straightPhase="WAIT"
+end
 local directionRadius = 8
 local EDGE_CONFIRM_SECONDS = 1.2
 local EDGE_RECHECK_INTERVAL = 0.35
@@ -4375,6 +4385,7 @@ straightToggle.OnChanged=function(v)
         session.lastValid=nil;session.lootTarget=nil;session.baseLatched=false
         session.lastRock=os.clock();session.lastScan=0;session.lastE=0
         straightNoRockSince=nil;straightSwitchTime=os.clock()
+        resetStraightSchedule()
         local root=getRoot()
         if root then
             straightLevel=root.Position.Y
@@ -4383,6 +4394,7 @@ straightToggle.OnChanged=function(v)
             session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
         end
     else
+        resetStraightSchedule()
         if not session.enabled then cleanup();boulderReleaseE();status.Text="OFF" end
     end
 end
@@ -4430,7 +4442,10 @@ RunService.Heartbeat:Connect(function(dt)
     local function resumeInMountain()
         session.phase="EXPLORE";session.layer=0;resetSector(now,root)
         session.returnBestDistance=nil;session.returnLastProgress=nil
-        if straightActive then straightLevel=root.Position.Y;straightNoRockSince=nil end
+        if straightActive then
+            straightLevel=root.Position.Y;straightNoRockSince=nil
+            resetStraightSchedule()
+        end
         session.lastValid=root.Position;session.lastValidAt=now
         local flat=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
         session.heading=flat.Magnitude>.01 and flat.Unit or Vector3.new(1,0,0)
@@ -4502,7 +4517,7 @@ RunService.Heartbeat:Connect(function(dt)
             local elapsed=now-straightWatchAt
             if elapsed>10 and straightRecoverStep<4 then
                 straightRecoverStep=4
-                straightLevel=(straightLevel or root.Position.Y)+((straightDirection=="Naik") and 100 or -100)
+                -- Recover heading only; scheduled layer height must never drift.
                 session.heading=findSurfaceHeading(root) or -session.heading
                 straightNoRockSince=nil;session.edgeLastScan=0
             elseif elapsed>6 and straightRecoverStep<3 then
@@ -4524,6 +4539,43 @@ RunService.Heartbeat:Connect(function(dt)
         straightWatchPos=nil;straightRecoverStep=0
     end
     if straightActive then
+        if not straightCycleStart then
+            straightCycleStart=now
+            straightStartLevel=root.Position.Y
+            straightCycleIndex=0
+            straightLevel=straightStartLevel
+        end
+        local elapsed=math.max(0,now-straightCycleStart)
+        local cycle=math.min(5,math.floor(elapsed/STRAIGHT_CYCLE_SECONDS))
+        local intoCycle=elapsed-cycle*STRAIGHT_CYCLE_SECONDS
+        local shifting=intoCycle>=STRAIGHT_SHIFT_START
+        straightCycleIndex=cycle+1
+        local baseLevel=straightStartLevel+cycle*STRAIGHT_STEP
+        local desiredLevel=baseLevel
+        if shifting then
+            if cycle<5 then
+                desiredLevel=baseLevel+STRAIGHT_STEP
+                straightPhase="CLIMB"
+            else
+                -- Last minute of cycle six: dig downward, consuming the spare time.
+                desiredLevel=straightStartLevel
+                straightPhase="DESCEND"
+            end
+        else
+            straightPhase="FARM"
+        end
+        straightLevel=desiredLevel
+        if shifting and math.abs(desiredLevel-root.Position.Y)>4 then
+            -- Keep mining while changing altitude. The 100-stud target is fixed,
+            -- and no leftover partial timer is persisted to Save Config.
+            local heading=session.heading.Magnitude>.1 and session.heading or Vector3.new(1,0,0)
+            local ydelta=math.clamp(desiredLevel-root.Position.Y,-12,12)
+            flyTowards(root,root.Position+heading*7+Vector3.new(0,ydelta,0),dt,2)
+            sweepDig(root,now)
+            session.scanMode=straightPhase.." MINING"
+            status.Text=string.format("STRAIGHT | Cycle %d/6 | %s\nHeight %.0f / target %.0f\nCycle time %02d:%02d",straightCycleIndex,straightPhase,root.Position.Y,desiredLevel,math.floor(intoCycle/60),math.floor(intoCycle%60))
+            return
+        end
         -- Flat sweep: keep the current mining level while surface exists.
         -- No-rock timer is based on surface detection, not merely position change.
         local heading=session.heading
@@ -4550,15 +4602,6 @@ RunService.Heartbeat:Connect(function(dt)
                 session.heading=alternate;session.edgeLastScan=0
                 session.scanMode="TURN TO ROCK"
                 flight(root);flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
-            elseif straightNoRockSince and now-straightNoRockSince>=10 then
-                -- 10-second timeout: change layer once and re-scan, avoiding continuous skyward flight.
-                if now-straightSwitchTime>=3 then
-                    straightSwitchTime=now
-                    local step=(straightDirection=="Naik") and 100 or -100
-                    straightLevel=(straightLevel or root.Position.Y)+step
-                    session.edgeLastScan=0
-                    straightNoRockSince=nil
-                end
             end
             local target=Vector3.new(root.Position.X,straightLevel or root.Position.Y,root.Position.Z)
             if math.abs(target.Y-root.Position.Y)>4 then
@@ -4575,7 +4618,7 @@ RunService.Heartbeat:Connect(function(dt)
                 session.phase="RETURN";session.returnSince=now
             end
         end
-        status.Text=string.format("V9 STRAIGHT | Speed %d | %s\n%s | Level %.0f\nNo surface %.1fs | E %.2fs",speed,straightDirection,
+        status.Text=string.format("STRAIGHT | Cycle %d/6 | %s\n%s | Level %.0f\nNo surface %.1fs | E %.2fs",straightCycleIndex,straightPhase,
             session.scanMode,straightLevel or root.Position.Y,
             straightNoRockSince and (now-straightNoRockSince) or 0,COLLECT_INTERVAL)
         return
