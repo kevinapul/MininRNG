@@ -3785,7 +3785,7 @@ task.spawn(function()
         return ok
     end
     RunService.Heartbeat:Connect(function()
-        if v9Control.holdE or (not active and os.clock()>=v9Control.lootUntil) then return end
+        if v9Control.holdE or v9Control.boulderBusy or (not active and os.clock()>=v9Control.lootUntil) then return end
         local now=os.clock()
         if now-lastScan>=scanInterval then lastScan=now;sample() end
         if now-lastKey < keyInterval then return end
@@ -4232,6 +4232,18 @@ local function boulderNearby(root)
     return nil
 end
 
+-- V10 Boulder prompt activation: hold E only until the interaction completes.
+-- Mining runs after the prompt is triggered, without holding E continuously.
+local boulderHoldSince=0
+local boulderHoldDuration=1.6
+local boulderRetryAt=0
+local function boulderPrompt(obj)
+    if not obj or not obj.Parent then return nil end
+    for _,desc in ipairs(obj:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") and desc.Enabled then return desc end
+    end
+    return nil
+end
 -- V9 Boulder controller. It is invoked before both navigation modes.
 local function boulderReleaseE()
     if v9Control.holdE then
@@ -4268,6 +4280,7 @@ local function boulderFind(root,now)
 end
 local function boulderStartLoot(now)
     boulderReleaseE()
+    v9Control.boulderBusy=false
     boulderState="LOOT"
     boulderLootStarted=now
     v9Control.lootUntil=now+12
@@ -4276,6 +4289,7 @@ end
 local function boulderStep(root,now,dt)
     if not boulderEnabled then
         if boulderState~="SEARCH" then boulderReleaseE() end
+        v9Control.boulderBusy=false
         boulderTarget=nil;boulderState="SEARCH"
         return false
     end
@@ -4294,6 +4308,9 @@ local function boulderStep(root,now,dt)
         boulderTarget=boulderFind(root,now)
         if not boulderTarget then boulderInfo.Text="SEARCHING revealed boulders";return false end
         boulderStarted=now
+        boulderRetryAt=now
+        boulderHoldSince=0
+        v9Control.boulderBusy=true
         boulderLastMovement=now
         boulderLastPosition=root.Position
         boulderState="APPROACH"
@@ -4307,6 +4324,7 @@ local function boulderStep(root,now,dt)
         boulderRejected[boulderTarget]=now+20
         boulderTarget=nil
         boulderReleaseE()
+        v9Control.boulderBusy=false
         return false
     end
     local distance=(pos-root.Position).Magnitude
@@ -4316,6 +4334,7 @@ local function boulderStep(root,now,dt)
     end
     if distance>8 then
         boulderReleaseE()
+        v9Control.boulderBusy=true
         boulderState="APPROACH"
         -- Aim for a position slightly outside the boulder, not its center.
         local difference=root.Position-pos
@@ -4330,18 +4349,35 @@ local function boulderStep(root,now,dt)
         -- If targeting fails for too long, skip temporarily, without trapping Explorer.
         if now-boulderLastMovement>9 or now-boulderStarted>90 then
             boulderRejected[boulderTarget]=now+25
-            boulderTarget=nil;boulderReleaseE();boulderState="SEARCH"
+            boulderTarget=nil;boulderReleaseE();v9Control.boulderBusy=false;boulderState="SEARCH"
         end
         return true
     end
-    -- Character in range. Stay stationary and keep E held while boulder exists.
-    boulderState="HOLD"
+    -- Within range: activate the prompt, RELEASE E, and allow automatic mining.
+    v9Control.boulderBusy=true
     flight(root)
     flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
-    boulderHoldE()
-    boulderInfo.Text=string.format("HOLD E | Boulder remains | %.0fs%s",now-boulderStarted,VirtualInputManager and "" or " | INPUT UNAVAILABLE")
-    -- We cannot reliably read HP without identifying the actual HUD data.
-    -- Periodically recheck if the boulder has moved out of reach.
+    if boulderState~="HOLD_PROMPT" and now>=boulderRetryAt then
+        local prompt=boulderPrompt(boulderTarget)
+        boulderHoldDuration=prompt and math.max(.2,prompt.HoldDuration+.3) or 1.6
+        boulderHoldSince=now
+        boulderState="HOLD_PROMPT"
+        boulderHoldE()
+        if not v9Control.holdE then
+            boulderState="WAIT_INPUT";boulderRetryAt=now+3
+        end
+    end
+    if boulderState=="HOLD_PROMPT" then
+        if now-boulderHoldSince>=boulderHoldDuration then
+            boulderReleaseE()
+            boulderState="MINING"
+            -- If nothing happens, retry prompt rather than staying stuck indefinitely.
+            boulderRetryAt=now+12
+        end
+        boulderInfo.Text=string.format("HOLD PROMPT | %.1f / %.1fs",now-boulderHoldSince,boulderHoldDuration)
+    else
+        boulderInfo.Text=string.format("%s | Retry in %.0fs | Boulder %.0fs",boulderState,math.max(0,boulderRetryAt-now),now-boulderStarted)
+    end
     return true
 end
 
@@ -4413,7 +4449,7 @@ RunService.Heartbeat:Connect(function(dt)
     if atBase and not session.baseLatched then
         session.baseLatched=true
         session.phase="RETURN";session.returnSince=now;session.returnBestDistance=nil;session.returnLastProgress=now
-        boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
+        boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
         session.sectors={};session.lastSector=nil;session.layer=0;session.habitatReached=false
         session.lastValid=nil;session.lootTarget=nil;session.edgeLastScan=0;session.edgeSince=nil
     elseif not atBase then
@@ -4725,7 +4761,7 @@ RunService.Heartbeat:Connect(function(dt)
        session.scanMode,knownBase and "Auto return ON" or "Set Base for recovery")
 end)
 player.CharacterAdded:Connect(function()
-    boulderReleaseE();boulderTarget=nil;boulderState="SEARCH"
+    boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
     cleanup()
     if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.returnBestDistance=nil;session.returnLastProgress=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
