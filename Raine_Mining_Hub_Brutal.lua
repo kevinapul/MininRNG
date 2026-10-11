@@ -4334,7 +4334,21 @@ local function boulderStep(root,now,dt)
         boulderLastMovement=now
     end
     local revealed=boulderTarget:GetAttribute("Revealed")==true
-    if not revealed then
+    -- Hidden is not the same as un-interactable. If the prompt is already
+    -- accessible, activate it even before the Revealed attribute flips.
+    local readyPrompt=boulderPrompt(boulderTarget)
+    local promptPosition=nil
+    if readyPrompt then
+        local parent=readyPrompt.Parent
+        if parent:IsA("BasePart") then
+            promptPosition=parent.Position
+        elseif parent:IsA("Attachment") then
+            promptPosition=parent.WorldPosition
+        end
+    end
+    local promptNear=readyPrompt and promptPosition
+        and (root.Position-promptPosition).Magnitude<=readyPrompt.MaxActivationDistance
+    if not revealed and not promptNear then
         -- Dig toward the hidden radar marker first. Do not try E or treat
         -- a hidden target as destroyed: only lost/destroyed instances start loot.
         boulderReleaseE()
@@ -4359,7 +4373,7 @@ local function boulderStep(root,now,dt)
         end
         return true
     end
-    if distance>8 then
+    if distance>8 and not promptNear then
         boulderReleaseE()
         v9Control.boulderBusy=true
         boulderState="APPROACH"
