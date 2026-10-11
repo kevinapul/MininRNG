@@ -4265,9 +4265,10 @@ local function boulderFind(root,now)
     local folder=workspace:FindFirstChild("Boulders")
     if not folder then return nil end
     local best=nil
-    local bestD=600
+    local bestD=85 -- stay near current mining route; avoid chasing across the whole mountain
     for _,obj in ipairs(folder:GetChildren()) do
-        if obj:GetAttribute("Revealed")==true and (boulderRejected[obj] or 0)<now then
+        -- Radar exposes hidden boulders as objects before tunnel excavation.
+        if (boulderRejected[obj] or 0)<now then
             local pos=getBoulderPosition(obj)
             if pos and (pos-root.Position).Magnitude<bestD
                 and (not knownBase or (pos-knownBase).Magnitude>90) then
@@ -4306,7 +4307,7 @@ local function boulderStep(root,now,dt)
     end
     if not boulderTarget then
         boulderTarget=boulderFind(root,now)
-        if not boulderTarget then boulderInfo.Text="SEARCHING revealed boulders";return false end
+        if not boulderTarget then boulderInfo.Text="SEARCHING nearby hidden/revealed boulders";return false end
         boulderStarted=now
         boulderRetryAt=now
         boulderHoldSince=0
@@ -4315,7 +4316,7 @@ local function boulderStep(root,now,dt)
         boulderLastPosition=root.Position
         boulderState="APPROACH"
     end
-    if not boulderTarget.Parent or boulderTarget:GetAttribute("Revealed")==false then
+    if not boulderTarget.Parent then
         boulderStartLoot(now)
         return true
     end
@@ -4332,6 +4333,32 @@ local function boulderStep(root,now,dt)
         boulderLastPosition=root.Position
         boulderLastMovement=now
     end
+    local revealed=boulderTarget:GetAttribute("Revealed")==true
+    if not revealed then
+        -- Dig toward the hidden radar marker first. Do not try E or treat
+        -- a hidden target as destroyed: only lost/destroyed instances start loot.
+        boulderReleaseE()
+        v9Control.boulderBusy=true
+        boulderState="EXCAVATE"
+        local dir=pos-root.Position
+        if dir.Magnitude>5 then
+            local outward=dir.Magnitude>.1 and dir.Unit or Vector3.new(1,0,0)
+            flyTowards(root,pos-outward*4,dt,3)
+        else
+            flight(root)
+            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+        end
+        if now-boulderNextDig>.12 then
+            boulderNextDig=now
+            if dir.Magnitude>.1 then digSurface(root,dir.Unit*7) end
+        end
+        boulderInfo.Text=string.format("EXCAVATE HIDDEN | %.1f studs | %.0fs",distance,now-boulderStarted)
+        if now-boulderStarted>75 then
+            boulderRejected[boulderTarget]=now+45
+            boulderTarget=nil;boulderState="SEARCH";v9Control.boulderBusy=false
+        end
+        return true
+    end
     if distance>8 then
         boulderReleaseE()
         v9Control.boulderBusy=true
@@ -4347,7 +4374,7 @@ local function boulderStep(root,now,dt)
         end
         boulderInfo.Text=string.format("APPROACH + EXPOSE | distance %.1f",distance)
         -- If targeting fails for too long, skip temporarily, without trapping Explorer.
-        if now-boulderLastMovement>9 or now-boulderStarted>90 then
+        if now-boulderLastMovement>15 or now-boulderStarted>110 then
             boulderRejected[boulderTarget]=now+25
             boulderTarget=nil;boulderReleaseE();v9Control.boulderBusy=false;boulderState="SEARCH"
         end
