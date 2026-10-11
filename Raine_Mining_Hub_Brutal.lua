@@ -4196,6 +4196,19 @@ local function flyTowards(root,goal,dt,stop)
     if flat.Magnitude>.1 then flightG.CFrame=CFrame.lookAt(root.Position,root.Position+flat.Unit) end
     return mag
 end
+-- Slow, controlled movement only while pursuing a Boulder.
+-- Normal Straight Sweep and other modes retain their original speeds.
+local function hunterApproach(root,goal,dt,stop)
+    local oldSpeed=speed
+    speed=math.min(speed,14)
+    local distance=flyTowards(root,goal,dt,stop)
+    speed=oldSpeed
+    if flightV then
+        local v=flightV.Velocity
+        flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-5,5),v.Z)
+    end
+    return distance
+end
 local function terrainCast(origin,vec)
     local p=RaycastParams.new();p.FilterType=Enum.RaycastFilterType.Exclude
     p.FilterDescendantsInstances={player.Character,gui};p.IgnoreWater=true
@@ -4675,7 +4688,7 @@ local function boulderStep(root,now,dt)
             if path.Magnitude>4 then
                 -- Follow a sloped tunnel toward the chosen side instead of teleporting.
                 local step=path.Unit*math.min(10,path.Magnitude)
-                flyTowards(root,root.Position+step,dt,2)
+                hunterApproach(root,root.Position+step,dt,2)
                 if now-boulderNextDig>.10 then
                     boulderNextDig=now
                     digSurface(root,path.Unit*7)
@@ -4720,7 +4733,11 @@ local function boulderStep(root,now,dt)
         -- Aim for a position slightly outside the boulder, not its center.
         local difference=root.Position-pos
         local outward=difference.Magnitude>.1 and difference.Unit or Vector3.new(1,0,0)
-        flyTowards(root,pos+outward*5,dt,4)
+        if hunterActive then
+            hunterApproach(root,pos+outward*5,dt,4)
+        else
+            flyTowards(root,pos+outward*5,dt,4)
+        end
         if now-boulderNextDig>.12 then
             boulderNextDig=now
             local vec=pos-root.Position
@@ -4983,185 +5000,123 @@ RunService.Heartbeat:Connect(function(dt)
         status.Text="V9 BOULDER | "..boulderState.."\n"..boulderInfo.Text
         return
     end
-    -- Independent Boulder Hunter scans before every navigation step.
-    -- boulderStep above preempts hunting whenever a hidden/revealed target exists.
+    -- Boulder Hunter is a straight-mining explorer with a Boulder override.
+    -- It shares Straight Sweep's surfaceProbe, findSurfaceHeading, sweepDig
+    -- and flyTowards navigation. Boulder priority takes over ABOVE this branch.
     if hunterActive then
         if not hunterStarted then
             hunterStarted=now
             hunterBaseHeight=root.Position.Y
             hunterLayerSince=now;hunterEmptySince=now
             hunterLastPosition=root.Position;hunterLastMove=now
+            hunterNav.edgeSince=nil;hunterNav.lastTurn=now
         end
-        session.heading=hunterHeading
         local targetAltitude=hunterBaseHeight+hunterTier*HUNTER_LAYER_STEP
+        session.heading=hunterHeading
+        local horizontal=knownMountain and Vector3.new(
+            root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z) or nil
+        -- When near the outside of the mountain, steer back inward while
+        -- keeping normal forward mining. Never hard-freeze the bot on no rock.
+        if horizontal and horizontal.Magnitude>450 and now-hunterNav.lastTurn>2 then
+            local inward=-horizontal
+            if inward.Magnitude>.1 then
+                hunterHeading=inward.Unit;session.heading=hunterHeading
+                hunterNav.lastTurn=now
+            end
+        end
         if hunterTargetHeight then
             local vertical=hunterTargetHeight-root.Position.Y
             if math.abs(vertical)<=5 then
                 hunterTargetHeight=nil
                 hunterLayerSince=now;hunterEmptySince=now
-            elseif now-hunterShiftSince>65 then
-                -- Failed layer shift: try another tunnel; never keep rising in sky.
-                hunterTargetHeight=nil;hunterLayerSince=now;hunterEmptySince=now
-                local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
-                hunterTier=math.clamp(math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5),0,maxTier)
-                hunterHeading=findSurfaceHeading(root) or -hunterHeading
-                hunterNav.probeAt=0;hunterNav.climbRoute=nil
-                hunterNav.climbMissingSince=nil;hunterNav.climbBestY=nil
+                hunterNav.edgeSince=nil
+            elseif now-hunterShiftSince>60 then
+                -- If this layer cannot be reached, keep horizontal mining;
+                -- try climbing again later rather than freezing forever.
+                hunterTargetHeight=nil
+                hunterEmptySince=now
+                hunterTier=math.max(0,math.floor(
+                    (root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5))
                 hunterNav.edgeSince=nil
             else
-                -- Move upward only toward actual rock in mining range.
-                -- No nearby rock means STOP and look for another tunnel.
-                if now-hunterNav.probeAt>.35 then
-                    hunterNav.probeAt=now
-                    local route,dir=hunterChooseClimb(root,vertical,hunterHeading)
-                    hunterNav.climbRoute=route
-                    hunterNav.climbDirection=dir
-                    hunterNav.climbRock=route~=nil
-                end
-                if hunterNav.climbRock and hunterNav.climbDirection
-                    and hunterRockCoverage(root)>=2 then
-                    hunterHeading=hunterNav.climbRoute
+                local hasRock=surfaceProbe(root,hunterHeading,20)
+                if not hasRock and now-hunterNav.lastTurn>2 then
+                    local alternative=findSurfaceHeading(root)
+                    hunterHeading=alternative or -hunterHeading
                     session.heading=hunterHeading
-                    hunterNav.climbMissingSince=nil
-                    hunterNav.lastRockPos=root.Position
-                    hunterNav.lastRockAt=now
-                    hunterNav.safePos=root.Position;hunterNav.safeAt=now
-                    if not hunterNav.climbBestY or
-                        (vertical>0 and root.Position.Y>hunterNav.climbBestY+1) or
-                        (vertical<0 and root.Position.Y<hunterNav.climbBestY-1) then
-                        hunterNav.climbBestY=root.Position.Y
-                    end
-                    -- Dig uphill first; cap speed so we stay close to the rock face.
-                    if now-session.lastDig>.11 then
-                        session.lastDig=now
-                        digSurface(root,hunterNav.climbDirection*7)
-                        digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
-                    end
-                    local oldSpeed=speed
-                    speed=math.min(speed,8)
-                    flyTowards(root,root.Position+hunterNav.climbDirection*4,dt,1.5)
-                    speed=oldSpeed
-                    hunterInfo.Text=string.format("TUNNEL CLIMB | Y %.0f/%.0f | Rock YES",
-                        root.Position.Y,hunterTargetHeight)
-                else
-                    hunterNav.climbMissingSince=hunterNav.climbMissingSince or now
-                    local anchor=hunterNav.safePos
-                    local back=anchor and (anchor-root.Position) or nil
-                    if back and back.Magnitude>5 and back.Magnitude<14 then
-                        local oldSpeed=speed
-                        speed=math.min(speed,8)
-                        flyTowards(root,anchor,dt,3)
-                        speed=oldSpeed
-                    else
-                        flight(root)
-                        flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.6)
-                    end
-                    if now-hunterNav.climbMissingSince>12 then
-                        hunterTargetHeight=nil
-                        hunterLayerSince=now;hunterEmptySince=now
-                        local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
-                        hunterTier=math.clamp(math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5),0,maxTier)
-                        hunterNav.climbMissingSince=nil;hunterNav.edgeSince=nil;hunterNav.probeAt=0
-                        hunterHeading=findSurfaceHeading(root) or -hunterHeading
-                    end
-                    hunterInfo.Text=string.format("CLIMB BLOCKED | Rock SEEK | Y %.0f",
-                        root.Position.Y)
+                    hunterNav.lastTurn=now
                 end
+                -- Straight Sweep's diagonal dig-and-rise, with a smaller
+                -- vertical step and capped speed so height rises gradually.
+                local rise=hasRock and math.clamp(vertical,-3,3) or 0
+                local travel=hunterHeading*8+Vector3.new(0,rise,0)
+                local oldSpeed=speed
+                speed=math.min(speed,12)
+                flyTowards(root,root.Position+travel,dt,2)
+                speed=oldSpeed
+                if flightV then
+                    local v=flightV.Velocity
+                    flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-3,3),v.Z)
+                end
+                sweepDig(root,now)
+                if hasRock and now-hunterNav.probeAt>.13 then
+                    hunterNav.probeAt=now
+                    digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
+                end
+                hunterInfo.Text=string.format("SLOW LAYER SHIFT | Y %.0f/%.0f | %s",
+                    root.Position.Y,hunterTargetHeight,hasRock and "DIGGING" or "SEEKING")
                 status.Text="BOULDER HUNTER | "..hunterInfo.Text
                 return
             end
         end
-        -- Scan mode means STRAIGHT MINING at this layer. Radar scanning itself
-        -- never changes travel direction or authorizes flying into empty sky.
-        local nearbyWalls=hunterRockCoverage(root)
-        local found=hunterSolid(terrainCast(root.Position,hunterHeading*7.5))
-        local horizontal=knownMountain and Vector3.new(
-            root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z) or nil
-        -- Turn inward before reaching the large-distance hard return boundary.
-        if horizontal and horizontal.Magnitude>450 and now-hunterNav.lastTurn>2 then
-            local inward=-horizontal
-            if inward.Magnitude>.1 then
-                hunterHeading=inward.Unit
-                session.heading=hunterHeading
-                hunterNav.lastTurn=now
-                found=hunterSolid(terrainCast(root.Position,hunterHeading*7.5))
-            end
-        end
-        if nearbyWalls<2 then
-            -- Prevent empty-air mining loops and flying away from the mountain.
-            -- Recover only along a short, rock-confirmed vector.
-            local anchor=hunterNav.safePos
-            local delta=anchor and (anchor-root.Position) or nil
-            if delta and delta.Magnitude>4 and delta.Magnitude<=12 and
-                hunterSolid(terrainCast(root.Position,delta)) then
-                local oldSpeed=speed
-                speed=math.min(speed,6)
-                flyTowards(root,anchor,dt,2)
-                speed=oldSpeed
-                hunterInfo.Text="SAFE RECOVERY | returning to close rock"
-            else
-                flight(root)
-                flightV.Velocity=Vector3.zero
-                hunterInfo.Text="SAFE HOLD | No close rock; move back into mine"
-            end
-            status.Text="BOULDER HUNTER | "..hunterInfo.Text
-            return
-        end
-        if found then
+        -- Main behavior: mine in a straight line at the active altitude.
+        -- Reuse the proven Straight Sweep movement instead of the strict
+        -- SAFE HOLD / minimum-two-walls rule from the failed experiment.
+        local hasRock=surfaceProbe(root,hunterHeading,20)
+        if hasRock then
             hunterNav.lastRockPos=root.Position
             hunterNav.lastRockAt=now
-            hunterNav.safePos=root.Position;hunterNav.safeAt=now
+            session.lastValid=root.Position
             hunterNav.edgeSince=nil
         else
             hunterNav.edgeSince=hunterNav.edgeSince or now
-            -- Keep heading stable while digging; only make an occasional
-            -- course correction if there is no surface along this tunnel.
-            if now-hunterNav.edgeSince>1.5 and now-hunterNav.lastTurn>2.5 then
-                session.heading=hunterHeading
-                local alternative=hunterFindDigHeading(root,hunterHeading)
+            if now-hunterNav.edgeSince>1.5 and now-hunterNav.lastTurn>2 then
+                local alternative=findSurfaceHeading(root)
                 if alternative then
                     hunterHeading=alternative
-                elseif hunterNav.lastRockPos then
-                    local back=hunterNav.lastRockPos-root.Position
-                    local flat=Vector3.new(back.X,0,back.Z)
-                    if flat.Magnitude>.1 then hunterHeading=flat.Unit end
+                elseif session.lastValid then
+                    local backwards=session.lastValid-root.Position
+                    local flat=Vector3.new(backwards.X,0,backwards.Z)
+                    hunterHeading=flat.Magnitude>.1 and flat.Unit or -hunterHeading
                 else
                     hunterHeading=-hunterHeading
                 end
                 session.heading=hunterHeading
                 hunterNav.lastTurn=now
+                hunterNav.edgeSince=now
             end
         end
-        -- Travel only through surveyed rock or a short gap (max 12 studs).
-        -- Altitude lock prevents the scanning phase from drifting upward.
-        local gap=hunterNav.lastRockPos
-            and (root.Position-hunterNav.lastRockPos).Magnitude or math.huge
-        local safeToAdvance=found and nearbyWalls>=2
-        if safeToAdvance then
-            local correction=math.clamp((targetAltitude-root.Position.Y)*.6,-2,2)
-            flyTowards(root,root.Position+hunterHeading*11+Vector3.new(0,correction,0),dt,2)
-        elseif hunterNav.lastRockPos and gap>4 then
-            -- Return a short distance to last detected rock, NOT to Base.
-            local last=hunterNav.lastRockPos
-            flyTowards(root,Vector3.new(last.X,root.Position.Y,last.Z),dt,3)
-        else
-            flight(root)
-            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.55)
-        end
+        -- Even if the next rock is temporarily missing, keep searching
+        -- horizontally at reduced speed instead of stopping indefinitely.
+        local travelSpeed=hasRock and speed or math.min(speed,12)
+        local oldSpeed=speed
+        speed=travelSpeed
+        local yCorrection=math.clamp((targetAltitude-root.Position.Y)*.6,-2,2)
+        flyTowards(root,root.Position+hunterHeading*(hasRock and 12 or 7)
+            +Vector3.new(0,yCorrection,0),dt,2)
+        speed=oldSpeed
         session.heading=hunterHeading
         sweepDig(root,now)
         if (root.Position-hunterLastPosition).Magnitude>6 then
             hunterLastPosition=root.Position;hunterLastMove=now
-        elseif now-hunterLastMove>8 and now-session.lastRock>3 and now-hunterNav.lastTurn>4 then
-            local alternate=hunterFindDigHeading(root,hunterHeading)
-            hunterHeading=alternate or -hunterHeading
+        elseif now-hunterLastMove>8 and now-hunterNav.lastTurn>3 then
+            hunterHeading=findSurfaceHeading(root) or -hunterHeading
             session.heading=hunterHeading
             hunterNav.lastTurn=now;hunterLastMove=now
         end
-        -- Advance layers only while the current mountain still offers rock.
-        -- Without this guard, empty sky can trigger repeated climbs and respawns.
-        if now-hunterEmptySince>=HUNTER_EMPTY_SECONDS
-            and hunterNav.lastRockAt>0 and now-hunterNav.lastRockAt<12 then
+        -- Keep the planned +100-stud progression after 30s without a Boulder,
+        -- but rising only uses a slow, sloped dig route (never straight up).
+        if now-hunterEmptySince>=HUNTER_EMPTY_SECONDS then
             hunterEmptySince=now
             local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
             if hunterTier>=maxTier then hunterDirection=-1 end
@@ -5171,13 +5126,12 @@ RunService.Heartbeat:Connect(function(dt)
             hunterShiftSince=now
         end
         if horizontal and horizontal.Magnitude>950 then
-            -- Genuine out-of-bounds recovery only; ordinary scanning turns at 450.
             session.phase="RETURN";session.returnSince=now
             session.returnBestDistance=nil;session.returnLastProgress=now
             resetHunter()
         end
-        hunterInfo.Text=string.format("STRAIGHT SCAN | Layer %d | Y %.0f/%.0f | Rock %s | R %d",
-            hunterTier+1,root.Position.Y,targetAltitude,found and "YES" or "SEEK",HUNTER_SCAN_RADIUS)
+        hunterInfo.Text=string.format("STRAIGHT HUNT | Layer %d | Y %.0f | Rock %s | Scan %d",
+            hunterTier+1,root.Position.Y,hasRock and "YES" or "SEEK",HUNTER_SCAN_RADIUS)
         status.Text="BOULDER HUNTER | "..hunterInfo.Text
         return
     end
