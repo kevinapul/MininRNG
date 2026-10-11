@@ -3852,6 +3852,8 @@ local hunterLastMove=0
 local hunterLastPosition=nil
 local hunterEmptySince=0
 local hunterHeading=Vector3.new(1,0,0)
+-- Keep scan movement within the current mountain, not free-flying in empty sky.
+local hunterNav={lastRockPos=nil,lastRockAt=0,edgeSince=nil,lastTurn=0}
 local HUNTER_SCAN_RADIUS=500
 local HUNTER_LAYER_STEP=100
 local HUNTER_EMPTY_SECONDS=30
@@ -3859,6 +3861,8 @@ local function resetHunter()
     hunterStarted=nil;hunterBaseHeight=nil;hunterTier=0;hunterDirection=1
     hunterTargetHeight=nil;hunterShiftSince=0;hunterLayerSince=0
     hunterLastMove=0;hunterLastPosition=nil;hunterEmptySince=0
+    hunterNav.lastRockPos=nil;hunterNav.lastRockAt=0
+    hunterNav.edgeSince=nil;hunterNav.lastTurn=0
 end
 local straightDirection = "Naik"
 local straightNoRockSince = nil
@@ -4752,26 +4756,74 @@ RunService.Heartbeat:Connect(function(dt)
                 return
             end
         end
-        -- While radar is empty, keep mining to reveal/spawn additional targets.
+        -- Scan mode means STRAIGHT MINING at this layer. Radar scanning itself
+        -- never changes travel direction or authorizes flying into empty sky.
         local found=surfaceProbe(root,hunterHeading,32)
-        if found then
-            local delta=math.clamp(targetAltitude-root.Position.Y,-4,4)
-            flyTowards(root,root.Position+hunterHeading*12+Vector3.new(0,delta,0),dt,2)
-            sweepDig(root,now)
-        else
-            local candidate=findSurfaceHeading(root)
-            if candidate then hunterHeading=candidate;session.heading=candidate end
-            flight(root)
-            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.3)
-            sweepDig(root,now)
+        local horizontal=knownMountain and Vector3.new(
+            root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z) or nil
+        -- Turn inward before reaching the large-distance hard return boundary.
+        if horizontal and horizontal.Magnitude>450 and now-hunterNav.lastTurn>2 then
+            local inward=-horizontal
+            if inward.Magnitude>.1 then
+                hunterHeading=inward.Unit
+                session.heading=hunterHeading
+                hunterNav.lastTurn=now
+            end
         end
+        if found then
+            hunterNav.lastRockPos=root.Position
+            hunterNav.lastRockAt=now
+            hunterNav.edgeSince=nil
+        else
+            hunterNav.edgeSince=hunterNav.edgeSince or now
+            -- Keep heading stable while digging; only make an occasional
+            -- course correction if there is no surface along this tunnel.
+            if now-hunterNav.edgeSince>1.5 and now-hunterNav.lastTurn>2.5 then
+                session.heading=hunterHeading
+                local alternative=findSurfaceHeading(root)
+                if alternative then
+                    hunterHeading=alternative
+                elseif hunterNav.lastRockPos then
+                    local back=hunterNav.lastRockPos-root.Position
+                    local flat=Vector3.new(back.X,0,back.Z)
+                    if flat.Magnitude>.1 then hunterHeading=flat.Unit end
+                else
+                    hunterHeading=-hunterHeading
+                end
+                session.heading=hunterHeading
+                hunterNav.lastTurn=now
+            end
+        end
+        -- Travel only through surveyed rock or a short gap (max 12 studs).
+        -- Altitude lock prevents the scanning phase from drifting upward.
+        local gap=hunterNav.lastRockPos
+            and (root.Position-hunterNav.lastRockPos).Magnitude or math.huge
+        local safeToAdvance=found or gap<12
+        if safeToAdvance then
+            local correction=math.clamp((targetAltitude-root.Position.Y)*.6,-2,2)
+            flyTowards(root,root.Position+hunterHeading*11+Vector3.new(0,correction,0),dt,2)
+        elseif hunterNav.lastRockPos and gap>4 then
+            -- Return a short distance to last detected rock, NOT to Base.
+            local last=hunterNav.lastRockPos
+            flyTowards(root,Vector3.new(last.X,root.Position.Y,last.Z),dt,3)
+        else
+            flight(root)
+            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.55)
+        end
+        session.heading=hunterHeading
+        sweepDig(root,now)
         if (root.Position-hunterLastPosition).Magnitude>6 then
             hunterLastPosition=root.Position;hunterLastMove=now
-        elseif now-hunterLastMove>6 then
-            hunterHeading=findSurfaceHeading(root) or -hunterHeading
-            session.heading=hunterHeading;hunterLastMove=now
+        elseif now-hunterLastMove>8 and now-session.lastRock>3 and now-hunterNav.lastTurn>4 then
+            local alternate=findSurfaceHeading(root)
+            hunterHeading=alternate or -hunterHeading
+            session.heading=hunterHeading
+            hunterNav.lastTurn=now;hunterLastMove=now
         end
-        if now-hunterEmptySince>=HUNTER_EMPTY_SECONDS then
+        -- Advance layers only while the current mountain still offers rock.
+        -- Without this guard, empty sky can trigger repeated climbs and respawns.
+        if now-hunterEmptySince>=HUNTER_EMPTY_SECONDS
+            and hunterNav.lastRockAt>0 and now-hunterNav.lastRockAt<12 then
             hunterEmptySince=now
             local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
             if hunterTier>=maxTier then hunterDirection=-1 end
@@ -4780,16 +4832,14 @@ RunService.Heartbeat:Connect(function(dt)
             hunterTargetHeight=hunterBaseHeight+hunterTier*HUNTER_LAYER_STEP
             hunterShiftSince=now
         end
-        if knownMountain then
-            local horizontal=Vector3.new(root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z)
-            if horizontal.Magnitude>1100 then
-                session.phase="RETURN";session.returnSince=now
-                session.returnBestDistance=nil;session.returnLastProgress=now
-                resetHunter()
-            end
+        if horizontal and horizontal.Magnitude>950 then
+            -- Genuine out-of-bounds recovery only; ordinary scanning turns at 450.
+            session.phase="RETURN";session.returnSince=now
+            session.returnBestDistance=nil;session.returnLastProgress=now
+            resetHunter()
         end
-        hunterInfo.Text=string.format("SEARCH | layer %d | height %.0f | scan %d",
-            hunterTier+1,root.Position.Y,HUNTER_SCAN_RADIUS)
+        hunterInfo.Text=string.format("STRAIGHT SCAN | Layer %d | Y %.0f/%.0f | Rock %s | R %d",
+            hunterTier+1,root.Position.Y,targetAltitude,found and "YES" or "SEEK",HUNTER_SCAN_RADIUS)
         status.Text="BOULDER HUNTER | "..hunterInfo.Text
         return
     end
