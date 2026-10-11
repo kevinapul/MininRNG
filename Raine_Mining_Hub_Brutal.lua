@@ -3959,7 +3959,7 @@ local hunterHeading=Vector3.new(1,0,0)
 -- Keep scan movement within the current mountain, not free-flying in empty sky.
 local hunterNav={lastRockPos=nil,lastRockAt=0,edgeSince=nil,lastTurn=0,
     probeAt=0,climbRoute=nil,climbDirection=nil,climbRock=false,
-    climbMissingSince=nil,climbBestY=nil}
+    climbMissingSince=nil,climbBestY=nil,safePos=nil,safeAt=0
 local HUNTER_SCAN_RADIUS=500
 local HUNTER_LAYER_STEP=100
 local HUNTER_EMPTY_SECONDS=30
@@ -3972,6 +3972,7 @@ local function resetHunter()
     hunterNav.probeAt=0;hunterNav.climbRoute=nil;hunterNav.climbDirection=nil
     hunterNav.climbRock=false;hunterNav.climbMissingSince=nil
     hunterNav.climbBestY=nil
+    hunterNav.safePos=nil;hunterNav.safeAt=0
 end
 local straightDirection = "Naik"
 local straightNoRockSince = nil
@@ -4254,7 +4255,30 @@ local function hunterCloseRock(root,direction,reach)
     end
     return nearest<math.huge,nearest
 end
+-- Distinguish a tunnel from a lone outer cliff face.
+local function hunterRockCoverage(root)
+    local count=0
+    for _,d in ipairs({
+        Vector3.new(1,0,0),Vector3.new(-1,0,0),
+        Vector3.new(0,0,1),Vector3.new(0,0,-1),
+        Vector3.new(0,1,0),Vector3.new(0,-1,0)}) do
+        if hunterSolid(terrainCast(root.Position,d*7.5)) then count+=1 end
+    end
+    return count
+end
+local function hunterFindDigHeading(root,heading)
+    local flat=Vector3.new(heading.X,0,heading.Z)
+    flat=flat.Magnitude>.1 and flat.Unit or Vector3.new(1,0,0)
+    for _,angle in ipairs({0,40,-40,80,-80,120,-120,180}) do
+        local t=math.rad(angle)
+        local dir=Vector3.new(flat.X*math.cos(t)-flat.Z*math.sin(t),0,
+            flat.X*math.sin(t)+flat.Z*math.cos(t))
+        if hunterSolid(terrainCast(root.Position,dir*7.5)) then return dir end
+    end
+    return nil
+end
 local function hunterChooseClimb(root,vertical,heading)
+    if hunterRockCoverage(root)<2 then return nil,nil end
     local flat=Vector3.new(heading.X,0,heading.Z)
     flat=flat.Magnitude>.1 and flat.Unit or Vector3.new(1,0,0)
     local sign=vertical>0 and 1 or -1
@@ -4270,7 +4294,7 @@ local function hunterChooseClimb(root,vertical,heading)
             flat.X*math.sin(theta)+flat.Z*math.cos(theta))
         local slope=candidate*7+Vector3.new(0,sign*4.5,0)
         local found,dist=hunterCloseRock(root,slope,7.5)
-        if found then
+        if found and hunterSolid(terrainCast(root.Position,slope.Unit*7.5)) then
             local score=25-math.abs(angle)*.065-math.abs(dist-3)*.45
             if inward then score+=candidate:Dot(inward)*9 end
             if score>bestScore then best=candidate;bestDir=slope.Unit;bestScore=score end
@@ -4994,12 +5018,14 @@ RunService.Heartbeat:Connect(function(dt)
                     hunterNav.climbDirection=dir
                     hunterNav.climbRock=route~=nil
                 end
-                if hunterNav.climbRock and hunterNav.climbDirection then
+                if hunterNav.climbRock and hunterNav.climbDirection
+                    and hunterRockCoverage(root)>=2 then
                     hunterHeading=hunterNav.climbRoute
                     session.heading=hunterHeading
                     hunterNav.climbMissingSince=nil
                     hunterNav.lastRockPos=root.Position
                     hunterNav.lastRockAt=now
+                    hunterNav.safePos=root.Position;hunterNav.safeAt=now
                     if not hunterNav.climbBestY or
                         (vertical>0 and root.Position.Y>hunterNav.climbBestY+1) or
                         (vertical<0 and root.Position.Y<hunterNav.climbBestY-1) then
@@ -5012,14 +5038,14 @@ RunService.Heartbeat:Connect(function(dt)
                         digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
                     end
                     local oldSpeed=speed
-                    speed=math.min(speed,12)
-                    flyTowards(root,root.Position+hunterNav.climbDirection*7,dt,1.5)
+                    speed=math.min(speed,8)
+                    flyTowards(root,root.Position+hunterNav.climbDirection*4,dt,1.5)
                     speed=oldSpeed
                     hunterInfo.Text=string.format("TUNNEL CLIMB | Y %.0f/%.0f | Rock YES",
                         root.Position.Y,hunterTargetHeight)
                 else
                     hunterNav.climbMissingSince=hunterNav.climbMissingSince or now
-                    local anchor=hunterNav.lastRockPos
+                    local anchor=hunterNav.safePos
                     local back=anchor and (anchor-root.Position) or nil
                     if back and back.Magnitude>5 and back.Magnitude<14 then
                         local oldSpeed=speed
@@ -5047,7 +5073,8 @@ RunService.Heartbeat:Connect(function(dt)
         end
         -- Scan mode means STRAIGHT MINING at this layer. Radar scanning itself
         -- never changes travel direction or authorizes flying into empty sky.
-        local found=hunterCloseRock(root,hunterHeading,7.5)
+        local nearbyWalls=hunterRockCoverage(root)
+        local found=hunterSolid(terrainCast(root.Position,hunterHeading*7.5))
         local horizontal=knownMountain and Vector3.new(
             root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z) or nil
         -- Turn inward before reaching the large-distance hard return boundary.
@@ -5057,11 +5084,33 @@ RunService.Heartbeat:Connect(function(dt)
                 hunterHeading=inward.Unit
                 session.heading=hunterHeading
                 hunterNav.lastTurn=now
+                found=hunterSolid(terrainCast(root.Position,hunterHeading*7.5))
             end
+        end
+        if nearbyWalls<2 then
+            -- Prevent empty-air mining loops and flying away from the mountain.
+            -- Recover only along a short, rock-confirmed vector.
+            local anchor=hunterNav.safePos
+            local delta=anchor and (anchor-root.Position) or nil
+            if delta and delta.Magnitude>4 and delta.Magnitude<=12 and
+                hunterSolid(terrainCast(root.Position,delta)) then
+                local oldSpeed=speed
+                speed=math.min(speed,6)
+                flyTowards(root,anchor,dt,2)
+                speed=oldSpeed
+                hunterInfo.Text="SAFE RECOVERY | returning to close rock"
+            else
+                flight(root)
+                flightV.Velocity=Vector3.zero
+                hunterInfo.Text="SAFE HOLD | No close rock; move back into mine"
+            end
+            status.Text="BOULDER HUNTER | "..hunterInfo.Text
+            return
         end
         if found then
             hunterNav.lastRockPos=root.Position
             hunterNav.lastRockAt=now
+            hunterNav.safePos=root.Position;hunterNav.safeAt=now
             hunterNav.edgeSince=nil
         else
             hunterNav.edgeSince=hunterNav.edgeSince or now
@@ -5069,7 +5118,7 @@ RunService.Heartbeat:Connect(function(dt)
             -- course correction if there is no surface along this tunnel.
             if now-hunterNav.edgeSince>1.5 and now-hunterNav.lastTurn>2.5 then
                 session.heading=hunterHeading
-                local alternative=findSurfaceHeading(root)
+                local alternative=hunterFindDigHeading(root,hunterHeading)
                 if alternative then
                     hunterHeading=alternative
                 elseif hunterNav.lastRockPos then
@@ -5087,7 +5136,7 @@ RunService.Heartbeat:Connect(function(dt)
         -- Altitude lock prevents the scanning phase from drifting upward.
         local gap=hunterNav.lastRockPos
             and (root.Position-hunterNav.lastRockPos).Magnitude or math.huge
-        local safeToAdvance=found or gap<12
+        local safeToAdvance=found and nearbyWalls>=2
         if safeToAdvance then
             local correction=math.clamp((targetAltitude-root.Position.Y)*.6,-2,2)
             flyTowards(root,root.Position+hunterHeading*11+Vector3.new(0,correction,0),dt,2)
@@ -5104,7 +5153,7 @@ RunService.Heartbeat:Connect(function(dt)
         if (root.Position-hunterLastPosition).Magnitude>6 then
             hunterLastPosition=root.Position;hunterLastMove=now
         elseif now-hunterLastMove>8 and now-session.lastRock>3 and now-hunterNav.lastTurn>4 then
-            local alternate=findSurfaceHeading(root)
+            local alternate=hunterFindDigHeading(root,hunterHeading)
             hunterHeading=alternate or -hunterHeading
             session.heading=hunterHeading
             hunterNav.lastTurn=now;hunterLastMove=now
