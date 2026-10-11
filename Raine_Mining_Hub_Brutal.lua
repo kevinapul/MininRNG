@@ -3945,6 +3945,7 @@ local straightSpeed = 28
 local straightActive = false
 -- Boulder Hunter: independent third navigation mode.
 local hunterActive=false
+local HUNTER_MOVE_SPEED=23 -- same speed for hunting, scanning and layer shifts
 local hunterStarted=nil
 local hunterBaseHeight=nil
 local hunterTier=0
@@ -4200,12 +4201,12 @@ end
 -- Normal Straight Sweep and other modes retain their original speeds.
 local function hunterApproach(root,goal,dt,stop)
     local oldSpeed=speed
-    speed=math.min(speed,14)
+    speed=HUNTER_MOVE_SPEED
     local distance=flyTowards(root,goal,dt,stop)
     speed=oldSpeed
     if flightV then
         local v=flightV.Velocity
-        flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-5,5),v.Z)
+        flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-HUNTER_MOVE_SPEED,HUNTER_MOVE_SPEED),v.Z)
     end
     return distance
 end
@@ -4898,7 +4899,7 @@ RunService.Heartbeat:Connect(function(dt)
         end
         enable:Set(false);straightToggle:Set(false);straightActive=false;activate(false);return
     end
-    speed=(straightActive or hunterActive) and straightSpeed or climbSpeed
+    speed=hunterActive and HUNTER_MOVE_SPEED or (straightActive and straightSpeed or climbSpeed)
     local now=os.clock()
     -- V7: base is a respawn checkpoint. Clear old RNG mountain sectors once per base visit.
     local atBase = checkBase(root)
@@ -5051,12 +5052,12 @@ RunService.Heartbeat:Connect(function(dt)
                 local rise=hasRock and math.clamp(vertical,-3,3) or 0
                 local travel=hunterHeading*8+Vector3.new(0,rise,0)
                 local oldSpeed=speed
-                speed=math.min(speed,12)
+                speed=HUNTER_MOVE_SPEED
                 flyTowards(root,root.Position+travel,dt,2)
                 speed=oldSpeed
                 if flightV then
                     local v=flightV.Velocity
-                    flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-3,3),v.Z)
+                    flightV.Velocity=Vector3.new(v.X,math.clamp(v.Y,-HUNTER_MOVE_SPEED,HUNTER_MOVE_SPEED),v.Z)
                 end
                 sweepDig(root,now)
                 if hasRock and now-hunterNav.probeAt>.13 then
@@ -5096,9 +5097,8 @@ RunService.Heartbeat:Connect(function(dt)
                 hunterNav.edgeSince=now
             end
         end
-        -- Even if the next rock is temporarily missing, keep searching
-        -- horizontally at reduced speed instead of stopping indefinitely.
-        local travelSpeed=hasRock and speed or math.min(speed,12)
+        -- Search and mine at the same 23-stud speed.
+        local travelSpeed=HUNTER_MOVE_SPEED
         local oldSpeed=speed
         speed=travelSpeed
         local yCorrection=math.clamp((targetAltitude-root.Position.Y)*.6,-2,2)
