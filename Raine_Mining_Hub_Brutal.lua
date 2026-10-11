@@ -4034,7 +4034,7 @@ hunterInfo.TextWrapped=true
 -- The legacy Boulder Priority can still assist the other two modes.
 local boulderCard=createCard(pageScroll,UDim2.fromOffset(16,865),UDim2.new(1,-32,0,158))
 local boulderToggle=createToggle(boulderCard,"Boulder Priority","Pause movement, uncover boulder, hold E, loot, resume",UDim2.fromOffset(16,8))
-local boulderInfo=mkLabel(boulderCard,"OFF | searches for revealed boulders every 0.7s",UDim2.fromOffset(16,90),UDim2.new(1,-32,0,54),11)
+local boulderInfo=mkLabel(boulderCard,"OFF | searches nearby hidden/revealed boulders every 0.7s",UDim2.fromOffset(16,90),UDim2.new(1,-32,0,54),11)
 boulderInfo.TextWrapped=true
 local boulderEnabled=false
 local boulderState="SEARCH"
@@ -4344,6 +4344,16 @@ local function boulderStep(root,now,dt)
         boulderStarted=now
         hunterEmptySince=now
         hunterFace=1;hunterFaceSince=now
+        if hunterActive then
+            local p=getBoulderPosition(boulderTarget)
+            if p then
+                local difference=root.Position-p
+                local distances={difference.X,-difference.X,difference.Z,-difference.Z,difference.Y,-difference.Y}
+                for k=2,6 do
+                    if distances[k]>distances[hunterFace] then hunterFace=k end
+                end
+            end
+        end
         hunterExcavateLastDistance=math.huge;hunterExcavateLastProgress=now
         boulderRetryAt=now
         boulderHoldSince=0
@@ -4598,6 +4608,10 @@ RunService.Heartbeat:Connect(function(dt)
     local root=getRoot()
     if not root then boulderReleaseE();cleanup();return end
     if flyEnabled then
+        if hunterActive then
+            hunterToggle:Set(false)
+            if hunterToggle.OnChanged then hunterToggle.OnChanged(false) end
+        end
         enable:Set(false);straightToggle:Set(false);straightActive=false;activate(false);return
     end
     speed=(straightActive or hunterActive) and straightSpeed or climbSpeed
