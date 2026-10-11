@@ -4441,12 +4441,18 @@ local function boulderStep(root,now,dt)
     -- The prompt can disappear again as soon as mining starts, before
     -- Revealed/HP attributes settle. Keep still; do NOT resume excavation.
     if boulderConfirmed then
-        boulderReleaseE()
-        boulderState="MINING"
-        flight(root)
-        flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
-        boulderInfo.Text=string.format("MINING | E CONFIRMED | Boulder %.0fs",now-boulderStarted)
-        return true
+        if now<boulderRetryAt then
+            boulderReleaseE()
+            boulderState="MINING"
+            flight(root)
+            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+            boulderInfo.Text=string.format("MINING | E CONFIRMED | Boulder %.0fs",now-boulderStarted)
+            return true
+        end
+        -- Watchdog: do not stay forever on an unbroken Boulder.
+        boulderConfirmed=false
+        boulderRetryAt=now
+        boulderState="READY"
     end
     if not revealed and not promptNear then
         -- Dig toward the hidden radar marker first. Do not try E or treat
