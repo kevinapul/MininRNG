@@ -47,6 +47,9 @@ local MINING_DIRECTIONS = {
 --// =========================================================
 
 local flyEnabled = false
+-- Shared camera controller: Movement UI owns the camera, Explorer only reports focus.
+local smartCameraEnabled = false
+local smartCameraFocus = {position=nil,prompt=nil,updatedAt=0,alignSince=nil}
 local autoMiningEnabled = false
 local destructiveMiningEnabled = false
 local autoBuyRadarEnabled = false
@@ -2055,6 +2058,107 @@ local ragdollToggle = createToggle(
 	"ON = paksa Humanoid ke Physics • OFF = bangun kembali",
 	UDim2.fromOffset(16, 242)
 )
+
+--// SMART CAMERA LOCK: fixed behind character; camera looks at Boulder prompt
+--// when the Explorer reports a target. Toggle is on the Movement page.
+local smartCameraToggle = createToggle(
+    movementPage,
+    "Smart Camera Lock",
+    "Forward camera; face Boulder / E automatically",
+    UDim2.fromOffset(16, 320)
+)
+local CAMERA_LOCK_BIND="RaineMiningHubSmartCamera"
+-- A second execution must replace, not stack, the old camera renderer.
+pcall(function() RunService:UnbindFromRenderStep(CAMERA_LOCK_BIND) end)
+local cameraBeforeType=nil
+local cameraBeforeSubject=nil
+local function unlockSmartCamera()
+    smartCameraEnabled=false
+    pcall(function() RunService:UnbindFromRenderStep(CAMERA_LOCK_BIND) end)
+    local camera=workspace.CurrentCamera
+    if camera then
+        camera.CameraType=cameraBeforeType or Enum.CameraType.Custom
+        local subject=cameraBeforeSubject
+        if not subject or not subject.Parent then subject=getHumanoid() end
+        if subject then camera.CameraSubject=subject end
+    end
+    cameraBeforeType=nil;cameraBeforeSubject=nil
+    smartCameraFocus.alignSince=nil
+end
+local function cameraPromptPosition(prompt)
+    if not prompt or not prompt.Parent or not prompt.Enabled then return nil end
+    local parent=prompt.Parent
+    if parent:IsA("Attachment") then return parent.WorldPosition end
+    if parent:IsA("BasePart") then return parent.Position end
+    if parent:IsA("Model") then
+        local ok,cf=pcall(function() return parent:GetPivot() end)
+        if ok and cf then return cf.Position end
+    end
+    return nil
+end
+local function smartCameraRender(dt)
+    if not smartCameraEnabled then return end
+    local camera=workspace.CurrentCamera
+    local root=getRoot()
+    if not camera or not root then return end
+    if camera.CameraType~=Enum.CameraType.Scriptable then
+        camera.CameraType=Enum.CameraType.Scriptable
+    end
+    local forward=root.CFrame.LookVector
+    local flat=Vector3.new(forward.X,0,forward.Z)
+    if flat.Magnitude<.05 then flat=Vector3.new(1,0,0) end
+    flat=flat.Unit
+    local focus=nil
+    local focusFresh=(os.clock()-smartCameraFocus.updatedAt)<.45
+    if focusFresh then
+        focus=cameraPromptPosition(smartCameraFocus.prompt) or smartCameraFocus.position
+    end
+    if focus then
+        local direction=focus-root.Position
+        local horizontal=Vector3.new(direction.X,0,direction.Z)
+        if horizontal.Magnitude>.3 then flat=horizontal.Unit end
+    end
+    local eye=root.Position+Vector3.new(0,2.3,0)
+    local preferred=eye-flat*(focus and 7 or 10)+Vector3.new(0,focus and 1.0 or 2.0,0)
+    -- Keep the camera outside rock while tunnelling.
+    local params=RaycastParams.new()
+    params.FilterType=Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances={player.Character}
+    params.IgnoreWater=true
+    local hit=workspace:Raycast(eye,preferred-eye,params)
+    if hit then
+        local towards=eye-hit.Position
+        preferred=hit.Position+(towards.Magnitude>.01 and towards.Unit*.65 or Vector3.zero)
+    end
+    local lookAt=focus or (root.Position+flat*15+Vector3.new(0,2.5,0))
+    if (lookAt-preferred).Magnitude<.15 then lookAt=preferred+flat end
+    local desired=CFrame.lookAt(preferred,lookAt)
+    camera.CFrame=camera.CFrame:Lerp(desired,1-math.exp(-math.clamp(dt,0,.1)*13))
+    camera.Focus=CFrame.new(lookAt)
+end
+local function setSmartCamera(v)
+    if v==smartCameraEnabled then return end
+    if v then
+        local camera=workspace.CurrentCamera
+        if not camera then
+            smartCameraToggle:Set(false)
+            return
+        end
+        cameraBeforeType=camera.CameraType==Enum.CameraType.Scriptable
+            and Enum.CameraType.Custom or camera.CameraType
+        cameraBeforeSubject=camera.CameraSubject
+        smartCameraEnabled=true
+        camera.CameraType=Enum.CameraType.Scriptable
+        pcall(function() RunService:UnbindFromRenderStep(CAMERA_LOCK_BIND) end)
+        RunService:BindToRenderStep(CAMERA_LOCK_BIND,Enum.RenderPriority.Camera.Value+1,smartCameraRender)
+    else
+        unlockSmartCamera()
+    end
+end
+smartCameraToggle.OnChanged=setSmartCamera
+gui.Destroying:Connect(function()
+    if smartCameraEnabled then unlockSmartCamera() end
+end)
 
 --// =========================================================
 --// BOULDER PAGE
@@ -4429,6 +4533,12 @@ local function boulderStep(root,now,dt)
     end
     local promptNear=(readyPrompt and promptPosition
         and (root.Position-promptPosition).Magnitude<=readyPrompt.MaxActivationDistance) and true or false
+    -- The Movement camera follows the target this Heartbeat; the next render
+    -- step turns toward its prompt before a key press is simulated.
+    smartCameraFocus.position=promptPosition or pos
+    smartCameraFocus.prompt=readyPrompt
+    smartCameraFocus.updatedAt=now
+    if not promptNear then smartCameraFocus.alignSince=nil end
     -- Critical: buried-to-visible transition cancels stale 12-second retries.
     -- Never delay a newly accessible MINE interaction due to a previous attempt.
     if ((revealed and not boulderWasRevealed) or (promptNear and not boulderWasPromptNear))
@@ -4549,6 +4659,21 @@ local function boulderStep(root,now,dt)
     v9Control.boulderBusy=true
     flight(root)
     flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+    -- With Smart Camera ON, allow up to 1 second for prompt E to face the camera.
+    -- Never block forever if the game still refuses line of sight.
+    if smartCameraEnabled and promptNear and promptPosition and not v9Control.holdE then
+        local cam=workspace.CurrentCamera
+        if not smartCameraFocus.alignSince then smartCameraFocus.alignSince=now end
+        if cam and (promptPosition-cam.CFrame.Position).Magnitude>.1 then
+            local direction=(promptPosition-cam.CFrame.Position).Unit
+            if cam.CFrame.LookVector:Dot(direction)<.86
+                and now-smartCameraFocus.alignSince<1 then
+                boulderState="ALIGN_CAMERA"
+                boulderInfo.Text="ALIGN CAMERA | waiting for prompt E"
+                return true
+            end
+        end
+    end
     if boulderState~="HOLD_PROMPT" and now>=boulderRetryAt then
         local prompt=boulderPrompt(boulderTarget)
         boulderHoldDuration=prompt and math.max(.2,prompt.HoldDuration+.3) or 1.6
@@ -5176,6 +5301,7 @@ task.spawn(function()
             climbSpeed=climbSpeed,straightSpeed=straightSpeed,
             targetTop=targetTop,direction=straightDirection,
             boulder=boulderEnabled,collector=raineCollectorBridge.get(),
+            smartCamera=smartCameraEnabled,
             autoRejoin=autoRejoin,minutes=minutes,
             autoBuyRadar=autoBuyRadarEnabled,autoBuyBomb=autoBuyBombEnabled,
             selectedRadars=selectedRadars,selectedBombs=selectedBombs,
@@ -5208,6 +5334,8 @@ task.spawn(function()
         topBox.Text=tostring(math.floor(targetTop))
         dirButton.Text="Direction: "..straightDirection.." ▼"
         boulderEnabled=config.boulder==true;boulderToggle:Set(boulderEnabled)
+        smartCameraToggle:Set(config.smartCamera==true)
+        if smartCameraToggle.OnChanged then smartCameraToggle.OnChanged(config.smartCamera==true) end
         raineCollectorBridge.set(config.collector==true)
         table.clear(selectedRadars);table.clear(selectedBombs)
         for k,v in pairs(type(config.selectedRadars)=="table" and config.selectedRadars or {}) do
