@@ -3957,7 +3957,9 @@ local hunterLastPosition=nil
 local hunterEmptySince=0
 local hunterHeading=Vector3.new(1,0,0)
 -- Keep scan movement within the current mountain, not free-flying in empty sky.
-local hunterNav={lastRockPos=nil,lastRockAt=0,edgeSince=nil,lastTurn=0}
+local hunterNav={lastRockPos=nil,lastRockAt=0,edgeSince=nil,lastTurn=0,
+    probeAt=0,climbRoute=nil,climbDirection=nil,climbRock=false,
+    climbMissingSince=nil,climbBestY=nil}
 local HUNTER_SCAN_RADIUS=500
 local HUNTER_LAYER_STEP=100
 local HUNTER_EMPTY_SECONDS=30
@@ -3967,6 +3969,9 @@ local function resetHunter()
     hunterLastMove=0;hunterLastPosition=nil;hunterEmptySince=0
     hunterNav.lastRockPos=nil;hunterNav.lastRockAt=0
     hunterNav.edgeSince=nil;hunterNav.lastTurn=0
+    hunterNav.probeAt=0;hunterNav.climbRoute=nil;hunterNav.climbDirection=nil
+    hunterNav.climbRock=false;hunterNav.climbMissingSince=nil
+    hunterNav.climbBestY=nil
 end
 local straightDirection = "Naik"
 local straightNoRockSince = nil
@@ -4222,6 +4227,56 @@ local function surfaceProbe(root, direction, range)
         end
     end
     return count >= 1, nearest
+end
+
+-- Hunter-only sensor: a distant wall must not count as diggable rock.
+local function hunterSolid(hit)
+    if not hit then return false end
+    local obj=hit.Instance
+    if obj==workspace.Terrain then return true end
+    local folder=workspace:FindFirstChild("Boulders")
+    return obj and obj:IsA("BasePart") and obj.Anchored
+        and obj.Size.Magnitude>=10
+        and (not folder or not obj:IsDescendantOf(folder))
+end
+local function hunterCloseRock(root,direction,reach)
+    if direction.Magnitude<.05 then return false,math.huge end
+    local vec=direction.Unit*(reach or 7.5)
+    local side=Vector3.new(-vec.Z,0,vec.X)
+    side=side.Magnitude>.1 and side.Unit*2 or Vector3.new(2,0,0)
+    local nearest=math.huge
+    for _,origin in ipairs({
+        root.Position,root.Position+side,root.Position-side,
+        root.Position+Vector3.new(0,2.2,0),
+        root.Position-Vector3.new(0,2.2,0)}) do
+        local hit=terrainCast(origin,vec)
+        if hunterSolid(hit) then nearest=math.min(nearest,(hit.Position-origin).Magnitude) end
+    end
+    return nearest<math.huge,nearest
+end
+local function hunterChooseClimb(root,vertical,heading)
+    local flat=Vector3.new(heading.X,0,heading.Z)
+    flat=flat.Magnitude>.1 and flat.Unit or Vector3.new(1,0,0)
+    local sign=vertical>0 and 1 or -1
+    local best,bestDir,bestScore=nil,nil,-math.huge
+    local inward=nil
+    if knownMountain then
+        local offset=Vector3.new(knownMountain.X-root.Position.X,0,knownMountain.Z-root.Position.Z)
+        if offset.Magnitude>80 then inward=offset.Unit end
+    end
+    for _,angle in ipairs({0,35,-35,70,-70,110,-110,180}) do
+        local theta=math.rad(angle)
+        local candidate=Vector3.new(flat.X*math.cos(theta)-flat.Z*math.sin(theta),0,
+            flat.X*math.sin(theta)+flat.Z*math.cos(theta))
+        local slope=candidate*7+Vector3.new(0,sign*4.5,0)
+        local found,dist=hunterCloseRock(root,slope,7.5)
+        if found then
+            local score=25-math.abs(angle)*.065-math.abs(dist-3)*.45
+            if inward then score+=candidate:Dot(inward)*9 end
+            if score>bestScore then best=candidate;bestDir=slope.Unit;bestScore=score end
+        end
+    end
+    return best,bestDir
 end
 
 local function findSurfaceHeading(root)
@@ -4920,29 +4975,79 @@ RunService.Heartbeat:Connect(function(dt)
             if math.abs(vertical)<=5 then
                 hunterTargetHeight=nil
                 hunterLayerSince=now;hunterEmptySince=now
-            elseif now-hunterShiftSince>90 then
-                -- Stuck on a vertical route: abandon climb, mine a new path.
+            elseif now-hunterShiftSince>65 then
+                -- Failed layer shift: try another tunnel; never keep rising in sky.
                 hunterTargetHeight=nil;hunterLayerSince=now;hunterEmptySince=now
-                hunterTier=math.max(0,math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5))
+                local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
+                hunterTier=math.clamp(math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5),0,maxTier)
                 hunterHeading=findSurfaceHeading(root) or -hunterHeading
+                hunterNav.probeAt=0;hunterNav.climbRoute=nil
+                hunterNav.climbMissingSince=nil;hunterNav.climbBestY=nil
+                hunterNav.edgeSince=nil
             else
-                local travel=hunterHeading*8+Vector3.new(0,math.clamp(vertical,-10,10),0)
-                flyTowards(root,root.Position+travel,dt,2)
-                if now-session.lastDig>.10 then
-                    session.lastDig=now
-                    local d=travel.Unit
-                    digSurface(root,d*7)
-                    digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
+                -- Move upward only toward actual rock in mining range.
+                -- No nearby rock means STOP and look for another tunnel.
+                if now-hunterNav.probeAt>.35 then
+                    hunterNav.probeAt=now
+                    local route,dir=hunterChooseClimb(root,vertical,hunterHeading)
+                    hunterNav.climbRoute=route
+                    hunterNav.climbDirection=dir
+                    hunterNav.climbRock=route~=nil
                 end
-                hunterInfo.Text=string.format("CLIMB | %.0f -> %.0f | Boulder scan %d",
-                    root.Position.Y,hunterTargetHeight,HUNTER_SCAN_RADIUS)
+                if hunterNav.climbRock and hunterNav.climbDirection then
+                    hunterHeading=hunterNav.climbRoute
+                    session.heading=hunterHeading
+                    hunterNav.climbMissingSince=nil
+                    hunterNav.lastRockPos=root.Position
+                    hunterNav.lastRockAt=now
+                    if not hunterNav.climbBestY or
+                        (vertical>0 and root.Position.Y>hunterNav.climbBestY+1) or
+                        (vertical<0 and root.Position.Y<hunterNav.climbBestY-1) then
+                        hunterNav.climbBestY=root.Position.Y
+                    end
+                    -- Dig uphill first; cap speed so we stay close to the rock face.
+                    if now-session.lastDig>.11 then
+                        session.lastDig=now
+                        digSurface(root,hunterNav.climbDirection*7)
+                        digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
+                    end
+                    local oldSpeed=speed
+                    speed=math.min(speed,12)
+                    flyTowards(root,root.Position+hunterNav.climbDirection*7,dt,1.5)
+                    speed=oldSpeed
+                    hunterInfo.Text=string.format("TUNNEL CLIMB | Y %.0f/%.0f | Rock YES",
+                        root.Position.Y,hunterTargetHeight)
+                else
+                    hunterNav.climbMissingSince=hunterNav.climbMissingSince or now
+                    local anchor=hunterNav.lastRockPos
+                    local back=anchor and (anchor-root.Position) or nil
+                    if back and back.Magnitude>5 and back.Magnitude<14 then
+                        local oldSpeed=speed
+                        speed=math.min(speed,8)
+                        flyTowards(root,anchor,dt,3)
+                        speed=oldSpeed
+                    else
+                        flight(root)
+                        flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.6)
+                    end
+                    if now-hunterNav.climbMissingSince>12 then
+                        hunterTargetHeight=nil
+                        hunterLayerSince=now;hunterEmptySince=now
+                        local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
+                        hunterTier=math.clamp(math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5),0,maxTier)
+                        hunterNav.climbMissingSince=nil;hunterNav.edgeSince=nil;hunterNav.probeAt=0
+                        hunterHeading=findSurfaceHeading(root) or -hunterHeading
+                    end
+                    hunterInfo.Text=string.format("CLIMB BLOCKED | Rock SEEK | Y %.0f",
+                        root.Position.Y)
+                end
                 status.Text="BOULDER HUNTER | "..hunterInfo.Text
                 return
             end
         end
         -- Scan mode means STRAIGHT MINING at this layer. Radar scanning itself
         -- never changes travel direction or authorizes flying into empty sky.
-        local found=surfaceProbe(root,hunterHeading,32)
+        local found=hunterCloseRock(root,hunterHeading,7.5)
         local horizontal=knownMountain and Vector3.new(
             root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z) or nil
         -- Turn inward before reaching the large-distance hard return boundary.
