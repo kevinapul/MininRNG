@@ -3839,6 +3839,27 @@ local speed = 32
 local climbSpeed = 32
 local straightSpeed = 28
 local straightActive = false
+-- Boulder Hunter: independent third navigation mode.
+local hunterActive=false
+local hunterStarted=nil
+local hunterBaseHeight=nil
+local hunterTier=0
+local hunterDirection=1
+local hunterTargetHeight=nil
+local hunterShiftSince=0
+local hunterLayerSince=0
+local hunterLastMove=0
+local hunterLastPosition=nil
+local hunterEmptySince=0
+local hunterHeading=Vector3.new(1,0,0)
+local HUNTER_SCAN_RADIUS=500
+local HUNTER_LAYER_STEP=100
+local HUNTER_EMPTY_SECONDS=30
+local function resetHunter()
+    hunterStarted=nil;hunterBaseHeight=nil;hunterTier=0;hunterDirection=1
+    hunterTargetHeight=nil;hunterShiftSince=0;hunterLayerSince=0
+    hunterLastMove=0;hunterLastPosition=nil;hunterEmptySince=0
+end
 local straightDirection = "Naik"
 local straightNoRockSince = nil
 local straightLevel = nil
@@ -3946,7 +3967,7 @@ status.TextWrapped=true;status.TextYAlignment=Enum.TextYAlignment.Top;status.Fon
 local pageScroll=Instance.new("ScrollingFrame")
 pageScroll.Name="ExplorerScroll";pageScroll.Size=UDim2.fromScale(1,1)
 pageScroll.BackgroundTransparency=1;pageScroll.ScrollBarThickness=4
-pageScroll.CanvasSize=UDim2.fromOffset(0,1270);pageScroll.Parent=page
+pageScroll.CanvasSize=UDim2.fromOffset(0,1430);pageScroll.Parent=page
 for _,child in ipairs(page:GetChildren()) do
     if child~=pageScroll and child:IsA("GuiObject") then child.Parent=pageScroll end
 end
@@ -4004,8 +4025,14 @@ UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch then draggingStraight=false end
 end)
 
--- V9 Boulder Priority is independent of Adaptive Climb and Straight Sweep.
-local boulderCard=createCard(pageScroll,UDim2.fromOffset(16,750),UDim2.new(1,-32,0,158))
+-- Mode 3 is exclusive with Adaptive Climb and Straight Sweep.
+local hunterCard=createCard(pageScroll,UDim2.fromOffset(16,750),UDim2.new(1,-32,0,104))
+local hunterToggle=createToggle(hunterCard,"Boulder Hunter (Mode 3)","500-stud 3D scan, hidden excavation, 100-stud layers",UDim2.fromOffset(16,8))
+local hunterInfo=mkLabel(hunterCard,"OFF | Standalone Boulder Hunter",UDim2.fromOffset(16,79),UDim2.new(1,-32,0,23),11)
+hunterInfo.TextWrapped=true
+
+-- The legacy Boulder Priority can still assist the other two modes.
+local boulderCard=createCard(pageScroll,UDim2.fromOffset(16,865),UDim2.new(1,-32,0,158))
 local boulderToggle=createToggle(boulderCard,"Boulder Priority","Pause movement, uncover boulder, hold E, loot, resume",UDim2.fromOffset(16,8))
 local boulderInfo=mkLabel(boulderCard,"OFF | searches for revealed boulders every 0.7s",UDim2.fromOffset(16,90),UDim2.new(1,-32,0,54),11)
 boulderInfo.TextWrapped=true
@@ -4017,6 +4044,10 @@ local boulderStarted=0
 local boulderLastScan=0
 local boulderLootStarted=0
 local boulderNextDig=0
+local hunterFace=1
+local hunterFaceSince=0
+local hunterExcavateLastDistance=math.huge
+local hunterExcavateLastProgress=0
 local boulderRejected=setmetatable({}, {__mode="k"})
 local boulderLastPosition=nil
 local boulderLastMovement=0
@@ -4265,7 +4296,8 @@ local function boulderFind(root,now)
     local folder=workspace:FindFirstChild("Boulders")
     if not folder then return nil end
     local best=nil
-    local bestD=85 -- stay near current mining route; avoid chasing across the whole mountain
+    local bestD=hunterActive and HUNTER_SCAN_RADIUS or 85
+    -- In Hunter mode all locally replicated boulders inside 500 studs are candidates.
     for _,obj in ipairs(folder:GetChildren()) do
         -- Radar exposes hidden boulders as objects before tunnel excavation.
         if (boulderRejected[obj] or 0)<now then
@@ -4282,13 +4314,14 @@ end
 local function boulderStartLoot(now)
     boulderReleaseE()
     v9Control.boulderBusy=false
+    if hunterActive then hunterEmptySince=now end
     boulderState="LOOT"
     boulderLootStarted=now
     v9Control.lootUntil=now+12
     boulderTarget=nil
 end
 local function boulderStep(root,now,dt)
-    if not boulderEnabled then
+    if not boulderEnabled and not hunterActive then
         if boulderState~="SEARCH" then boulderReleaseE() end
         v9Control.boulderBusy=false
         boulderTarget=nil;boulderState="SEARCH"
@@ -4309,6 +4342,9 @@ local function boulderStep(root,now,dt)
         boulderTarget=boulderFind(root,now)
         if not boulderTarget then boulderInfo.Text="SEARCHING nearby hidden/revealed boulders";return false end
         boulderStarted=now
+        hunterEmptySince=now
+        hunterFace=1;hunterFaceSince=now
+        hunterExcavateLastDistance=math.huge;hunterExcavateLastProgress=now
         boulderRetryAt=now
         boulderHoldSince=0
         v9Control.boulderBusy=true
@@ -4355,20 +4391,65 @@ local function boulderStep(root,now,dt)
         v9Control.boulderBusy=true
         boulderState="EXCAVATE"
         local dir=pos-root.Position
-        if dir.Magnitude>5 then
-            local outward=dir.Magnitude>.1 and dir.Unit or Vector3.new(1,0,0)
-            flyTowards(root,pos-outward*4,dt,3)
+        if hunterActive then
+            -- Hidden Boulder is never considered destroyed. Open a route toward
+            -- its side, switching approach face when no progress is made.
+            local faces={Vector3.new(1,0,0),Vector3.new(-1,0,0),
+                Vector3.new(0,0,1),Vector3.new(0,0,-1),
+                Vector3.new(0,1,0),Vector3.new(0,-1,0)}
+            if distance<hunterExcavateLastDistance-2 then
+                hunterExcavateLastDistance=distance;hunterExcavateLastProgress=now
+            end
+            if now-hunterFaceSince>12 or now-hunterExcavateLastProgress>10 then
+                hunterFace=hunterFace%6+1
+                hunterFaceSince=now;hunterExcavateLastProgress=now
+                hunterExcavateLastDistance=distance
+            end
+            local radius=11
+            if boulderTarget:IsA("Model") then
+                local ok,ext=pcall(function() return boulderTarget:GetExtentsSize() end)
+                if ok then radius=math.clamp(math.max(ext.X,ext.Y,ext.Z)*.5+4,10,24) end
+            end
+            local face=faces[hunterFace]
+            local approach=pos+face*radius
+            local path=approach-root.Position
+            if path.Magnitude>4 then
+                -- Follow a sloped tunnel toward the chosen side instead of teleporting.
+                local step=path.Unit*math.min(10,path.Magnitude)
+                flyTowards(root,root.Position+step,dt,2)
+                if now-boulderNextDig>.10 then
+                    boulderNextDig=now
+                    digSurface(root,path.Unit*7)
+                end
+            else
+                flight(root)
+                flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.3)
+                if now-boulderNextDig>.12 then
+                    boulderNextDig=now
+                    -- Remove rock enclosing multiple Boulder faces; one ray per tick.
+                    local scan=faces[(math.floor(now*9)%6)+1]
+                    local direction=pos+scan*math.min(radius,7)-root.Position
+                    if direction.Magnitude>.2 then digSurface(root,direction.Unit*7) end
+                end
+            end
+            boulderInfo.Text=string.format("HUNT EXCAVATE | face %d/6 | %.0f studs | %.0fs",
+                hunterFace,distance,now-boulderStarted)
         else
-            flight(root)
-            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+            if dir.Magnitude>5 then
+                local outward=dir.Magnitude>.1 and dir.Unit or Vector3.new(1,0,0)
+                flyTowards(root,pos-outward*4,dt,3)
+            else
+                flight(root)
+                flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.35)
+            end
+            if now-boulderNextDig>.12 then
+                boulderNextDig=now
+                if dir.Magnitude>.1 then digSurface(root,dir.Unit*7) end
+            end
+            boulderInfo.Text=string.format("EXCAVATE HIDDEN | %.1f studs | %.0fs",distance,now-boulderStarted)
         end
-        if now-boulderNextDig>.12 then
-            boulderNextDig=now
-            if dir.Magnitude>.1 then digSurface(root,dir.Unit*7) end
-        end
-        boulderInfo.Text=string.format("EXCAVATE HIDDEN | %.1f studs | %.0fs",distance,now-boulderStarted)
-        if now-boulderStarted>75 then
-            boulderRejected[boulderTarget]=now+45
+        if now-boulderStarted>(hunterActive and 150 or 75) then
+            boulderRejected[boulderTarget]=now+40
             boulderTarget=nil;boulderState="SEARCH";v9Control.boulderBusy=false
         end
         return true
@@ -4423,6 +4504,11 @@ local function boulderStep(root,now,dt)
 end
 
 local function activate(v)
+    if v and hunterActive then
+        hunterToggle:Set(false)
+        hunterActive=false;resetHunter()
+        boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
+    end
     if v and straightActive then
         straightToggle:Set(false)
         straightActive=false
@@ -4454,6 +4540,10 @@ straightToggle.OnChanged=function(v)
         straightToggle:Set(false);status.Text="Turn OFF manual Fly first.";return
     end
     if v and session.enabled then enable:Set(false);activate(false) end
+    if v and hunterActive then
+        hunterToggle:Set(false);hunterActive=false;resetHunter()
+        boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
+    end
     straightActive=v
     if v then
         speed=straightSpeed
@@ -4472,18 +4562,45 @@ straightToggle.OnChanged=function(v)
         end
     else
         resetStraightSchedule()
-        if not session.enabled then cleanup();boulderReleaseE();status.Text="OFF" end
+        if not session.enabled and not hunterActive then cleanup();boulderReleaseE();status.Text="OFF" end
+    end
+end
+
+hunterToggle.OnChanged=function(v)
+    if v and flyEnabled then hunterToggle:Set(false);status.Text="Turn OFF manual Fly first.";return end
+    if v then
+        if session.enabled then enable:Set(false);activate(false) end
+        if straightActive then
+            straightToggle:Set(false)
+            if straightToggle.OnChanged then straightToggle.OnChanged(false) end
+        end
+        hunterActive=true;resetHunter()
+        boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
+        session.phase="EXPLORE";session.baseLatched=false
+        local root=getRoot()
+        if root then
+            local flat=Vector3.new(root.CFrame.LookVector.X,0,root.CFrame.LookVector.Z)
+            hunterHeading=flat.Magnitude>.1 and flat.Unit or Vector3.new(1,0,0)
+            session.heading=hunterHeading
+        end
+    else
+        hunterActive=false;resetHunter()
+        if not session.enabled and not straightActive then
+            boulderReleaseE();v9Control.boulderBusy=false
+            boulderTarget=nil;boulderState="SEARCH"
+            cleanup();status.Text="OFF"
+        end
     end
 end
 
 RunService.Heartbeat:Connect(function(dt)
-    if not session.enabled and not straightActive then boulderReleaseE();return end
+    if not session.enabled and not straightActive and not hunterActive then boulderReleaseE();return end
     local root=getRoot()
     if not root then boulderReleaseE();cleanup();return end
     if flyEnabled then
         enable:Set(false);straightToggle:Set(false);straightActive=false;activate(false);return
     end
-    speed=straightActive and straightSpeed or climbSpeed
+    speed=(straightActive or hunterActive) and straightSpeed or climbSpeed
     local now=os.clock()
     -- V7: base is a respawn checkpoint. Clear old RNG mountain sectors once per base visit.
     local atBase = checkBase(root)
@@ -4519,6 +4636,7 @@ RunService.Heartbeat:Connect(function(dt)
     local function resumeInMountain()
         session.phase="EXPLORE";session.layer=0;resetSector(now,root)
         session.returnBestDistance=nil;session.returnLastProgress=nil
+        if hunterActive then resetHunter() end
         if straightActive then
             straightLevel=root.Position.Y;straightNoRockSince=nil
             resetStraightSchedule()
@@ -4582,6 +4700,83 @@ RunService.Heartbeat:Connect(function(dt)
     -- Priority controller takes over movement only while actively processing a boulder.
     if boulderStep(root,now,dt) then
         status.Text="V9 BOULDER | "..boulderState.."\n"..boulderInfo.Text
+        return
+    end
+    -- Independent Boulder Hunter scans before every navigation step.
+    -- boulderStep above preempts hunting whenever a hidden/revealed target exists.
+    if hunterActive then
+        if not hunterStarted then
+            hunterStarted=now
+            hunterBaseHeight=root.Position.Y
+            hunterLayerSince=now;hunterEmptySince=now
+            hunterLastPosition=root.Position;hunterLastMove=now
+        end
+        session.heading=hunterHeading
+        local targetAltitude=hunterBaseHeight+hunterTier*HUNTER_LAYER_STEP
+        if hunterTargetHeight then
+            local vertical=hunterTargetHeight-root.Position.Y
+            if math.abs(vertical)<=5 then
+                hunterTargetHeight=nil
+                hunterLayerSince=now;hunterEmptySince=now
+            elseif now-hunterShiftSince>90 then
+                -- Stuck on a vertical route: abandon climb, mine a new path.
+                hunterTargetHeight=nil;hunterLayerSince=now;hunterEmptySince=now
+                hunterTier=math.max(0,math.floor((root.Position.Y-hunterBaseHeight)/HUNTER_LAYER_STEP+.5))
+                hunterHeading=findSurfaceHeading(root) or -hunterHeading
+            else
+                local travel=hunterHeading*8+Vector3.new(0,math.clamp(vertical,-10,10),0)
+                flyTowards(root,root.Position+travel,dt,2)
+                if now-session.lastDig>.10 then
+                    session.lastDig=now
+                    local d=travel.Unit
+                    digSurface(root,d*7)
+                    digSurface(root,Vector3.new(0,vertical>0 and 7 or -7,0))
+                end
+                hunterInfo.Text=string.format("CLIMB | %.0f -> %.0f | Boulder scan %d",
+                    root.Position.Y,hunterTargetHeight,HUNTER_SCAN_RADIUS)
+                status.Text="BOULDER HUNTER | "..hunterInfo.Text
+                return
+            end
+        end
+        -- While radar is empty, keep mining to reveal/spawn additional targets.
+        local found=surfaceProbe(root,hunterHeading,32)
+        if found then
+            local delta=math.clamp(targetAltitude-root.Position.Y,-4,4)
+            flyTowards(root,root.Position+hunterHeading*12+Vector3.new(0,delta,0),dt,2)
+            sweepDig(root,now)
+        else
+            local candidate=findSurfaceHeading(root)
+            if candidate then hunterHeading=candidate;session.heading=candidate end
+            flight(root)
+            flightV.Velocity=flightV.Velocity:Lerp(Vector3.zero,.3)
+            sweepDig(root,now)
+        end
+        if (root.Position-hunterLastPosition).Magnitude>6 then
+            hunterLastPosition=root.Position;hunterLastMove=now
+        elseif now-hunterLastMove>6 then
+            hunterHeading=findSurfaceHeading(root) or -hunterHeading
+            session.heading=hunterHeading;hunterLastMove=now
+        end
+        if now-hunterEmptySince>=HUNTER_EMPTY_SECONDS then
+            hunterEmptySince=now
+            local maxTier=math.max(1,math.floor(targetTop/HUNTER_LAYER_STEP))
+            if hunterTier>=maxTier then hunterDirection=-1 end
+            if hunterTier<=0 then hunterDirection=1 end
+            hunterTier=math.clamp(hunterTier+hunterDirection,0,maxTier)
+            hunterTargetHeight=hunterBaseHeight+hunterTier*HUNTER_LAYER_STEP
+            hunterShiftSince=now
+        end
+        if knownMountain then
+            local horizontal=Vector3.new(root.Position.X-knownMountain.X,0,root.Position.Z-knownMountain.Z)
+            if horizontal.Magnitude>1100 then
+                session.phase="RETURN";session.returnSince=now
+                session.returnBestDistance=nil;session.returnLastProgress=now
+                resetHunter()
+            end
+        end
+        hunterInfo.Text=string.format("SEARCH | layer %d | height %.0f | scan %d",
+            hunterTier+1,root.Position.Y,HUNTER_SCAN_RADIUS)
+        status.Text="BOULDER HUNTER | "..hunterInfo.Text
         return
     end
     -- V8: crystal collection is controlled by its own independent toggle.
@@ -4804,7 +4999,7 @@ end)
 player.CharacterAdded:Connect(function()
     boulderReleaseE();v9Control.boulderBusy=false;boulderTarget=nil;boulderState="SEARCH"
     cleanup()
-    if session.enabled or straightActive then session.phase="RETURN";session.returnSince=os.clock();session.returnBestDistance=nil;session.returnLastProgress=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
+    if session.enabled or straightActive or hunterActive then session.phase="RETURN";session.returnSince=os.clock();session.returnBestDistance=nil;session.returnLastProgress=os.clock();session.lootTarget=nil;session.sectors={};session.layer=0;session.habitatReached=false end
 end)
 
 
@@ -4831,7 +5026,7 @@ task.spawn(function()
         if x and y and z then return Vector3.new(x,y,z) end
         return nil
     end
-    local panel=createCard(pageScroll,UDim2.fromOffset(16,925),UDim2.new(1,-32,0,294))
+    local panel=createCard(pageScroll,UDim2.fromOffset(16,1040),UDim2.new(1,-32,0,294))
     local headline=mkLabel(panel,"V9.5 • Config & Rejoin",UDim2.fromOffset(12,8),UDim2.new(1,-24,0,22),15)
     local indicator=mkLabel(panel,"Config: "..(ioOK and "ready" or "file APIs unavailable"),UDim2.fromOffset(12,34),UDim2.new(1,-24,0,20),11)
     local saveButton=createActionButton(panel,"Save Config",UDim2.fromOffset(12,61),UDim2.new(.5,-18,0,32))
@@ -4854,7 +5049,7 @@ task.spawn(function()
         if not ioOK then return false,"readfile/writefile unavailable" end
         local config={
             schema=94,base=packVec(knownBase),mountain=packVec(knownMountain),
-            mode=session.enabled and "climb" or (straightActive and "straight" or "off"),
+            mode=hunterActive and "hunter" or (session.enabled and "climb" or (straightActive and "straight" or "off")),
             climbSpeed=climbSpeed,straightSpeed=straightSpeed,
             targetTop=targetTop,direction=straightDirection,
             boulder=boulderEnabled,collector=raineCollectorBridge.get(),
@@ -4954,6 +5149,9 @@ task.spawn(function()
         if config.mode=="climb" then
             enable:Set(true)
             if enable.OnChanged then enable.OnChanged(true) end
+        elseif config.mode=="hunter" then
+            hunterToggle:Set(true)
+            if hunterToggle.OnChanged then hunterToggle.OnChanged(true) end
         elseif config.mode=="straight" then
             straightToggle:Set(true)
             if straightToggle.OnChanged then straightToggle.OnChanged(true) end
@@ -4974,9 +5172,9 @@ task.spawn(function()
             if autoRejoin then
                 -- Align the configured rejoin interval with actual mountain farming,
                 -- not the travel/loading time before Straight Sweep first starts.
-                if straightActive and straightCycleStart and not alignedStraightStart then
-                    alignedStraightStart=straightCycleStart
-                    deadline=straightCycleStart+minutes*60
+                if ((straightActive and straightCycleStart) or (hunterActive and hunterStarted)) and not alignedStraightStart then
+                    alignedStraightStart=straightCycleStart or hunterStarted
+                    deadline=alignedStraightStart+minutes*60
                 end
                 local left=math.max(0,math.ceil(deadline-now))
                 countdown.Text=string.format("Next rejoin: %02d:%02d",math.floor(left/60),left%60)
