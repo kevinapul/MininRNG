@@ -4272,6 +4272,12 @@ end
 local boulderHoldSince=0
 local boulderHoldDuration=1.6
 local boulderRetryAt=0
+local boulderWasRevealed=false
+local boulderWasPromptNear=false
+local boulderLastPrompt=nil
+local boulderConfirmed=false
+local boulderAttemptCount=0
+local boulderInputMode="KEY"
 local function boulderPrompt(obj)
     if not obj or not obj.Parent then return nil end
     for _,desc in ipairs(obj:GetDescendants()) do
@@ -4281,19 +4287,39 @@ local function boulderPrompt(obj)
 end
 -- V9 Boulder controller. It is invoked before both navigation modes.
 local function boulderReleaseE()
-    if v9Control.holdE then
-        v9Control.holdE=false
-        if VirtualInputManager then
-            pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
-        end
+    if not v9Control.holdE then return end
+    v9Control.holdE=false
+    if boulderInputMode=="PROMPT" and boulderLastPrompt then
+        pcall(function() boulderLastPrompt:InputHoldEnd() end)
+    elseif VirtualInputManager then
+        pcall(function() VirtualInputManager:SendKeyEvent(false,Enum.KeyCode.E,false,game) end)
     end
 end
-local function boulderHoldE()
+local function boulderHoldE(prompt)
     if v9Control.holdE then return end
+    boulderAttemptCount+=1
+    boulderLastPrompt=prompt
+    -- Alternate prompt-native input and key events. Emulator input handling
+    -- differs from desktop; use a second route only if the first is unconfirmed.
+    if prompt and boulderAttemptCount%2==1 then
+        local ok=pcall(function() prompt:InputHoldBegin() end)
+        if ok then boulderInputMode="PROMPT";v9Control.holdE=true;return end
+    end
     if not VirtualInputManager then return end
     local ok=pcall(function() VirtualInputManager:SendKeyEvent(true,Enum.KeyCode.E,false,game) end)
-    v9Control.holdE=ok
+    if ok then boulderInputMode="KEY";v9Control.holdE=true end
 end
+-- A confirmed local prompt activation is stronger evidence than a successful
+-- pcall. Do not send E again while that boulder is already being mined.
+game:GetService("ProximityPromptService").PromptTriggered:Connect(function(prompt)
+    if not boulderTarget or not boulderTarget.Parent then return end
+    if prompt==boulderLastPrompt or prompt:IsDescendantOf(boulderTarget) then
+        boulderConfirmed=true
+        boulderRetryAt=os.clock()+45
+        boulderState="MINING"
+        boulderReleaseE()
+    end
+end)
 local function boulderFind(root,now)
     if now-boulderLastScan<.7 then return nil end
     boulderLastScan=now
@@ -4317,6 +4343,8 @@ local function boulderFind(root,now)
 end
 local function boulderStartLoot(now)
     boulderReleaseE()
+    boulderConfirmed=false
+    boulderLastPrompt=nil
     v9Control.boulderBusy=false
     if hunterActive then hunterEmptySince=now end
     boulderState="LOOT"
@@ -4329,6 +4357,7 @@ local function boulderStep(root,now,dt)
         if boulderState~="SEARCH" then boulderReleaseE() end
         v9Control.boulderBusy=false
         boulderTarget=nil;boulderState="SEARCH"
+        boulderConfirmed=false;boulderLastPrompt=nil
         return false
     end
     if boulderState=="LOOT" then
@@ -4360,6 +4389,8 @@ local function boulderStep(root,now,dt)
         end
         hunterExcavateLastDistance=math.huge;hunterExcavateLastProgress=now
         boulderRetryAt=now
+        boulderWasRevealed=false;boulderWasPromptNear=false
+        boulderConfirmed=false;boulderLastPrompt=nil;boulderAttemptCount=0
         boulderHoldSince=0
         v9Control.boulderBusy=true
         boulderLastMovement=now
@@ -4396,8 +4427,17 @@ local function boulderStep(root,now,dt)
             promptPosition=parent.WorldPosition
         end
     end
-    local promptNear=readyPrompt and promptPosition
-        and (root.Position-promptPosition).Magnitude<=readyPrompt.MaxActivationDistance
+    local promptNear=(readyPrompt and promptPosition
+        and (root.Position-promptPosition).Magnitude<=readyPrompt.MaxActivationDistance) and true or false
+    -- Critical: buried-to-visible transition cancels stale 12-second retries.
+    -- Never delay a newly accessible MINE interaction due to a previous attempt.
+    if ((revealed and not boulderWasRevealed) or (promptNear and not boulderWasPromptNear))
+        and not boulderConfirmed and boulderState~="HOLD_PROMPT" then
+        boulderRetryAt=now
+        boulderState="READY"
+    end
+    boulderWasRevealed=revealed
+    boulderWasPromptNear=promptNear
     if not revealed and not promptNear then
         -- Dig toward the hidden radar marker first. Do not try E or treat
         -- a hidden target as destroyed: only lost/destroyed instances start loot.
@@ -4498,7 +4538,7 @@ local function boulderStep(root,now,dt)
         boulderHoldDuration=prompt and math.max(.2,prompt.HoldDuration+.3) or 1.6
         boulderHoldSince=now
         boulderState="HOLD_PROMPT"
-        boulderHoldE()
+        boulderHoldE(readyPrompt)
         if not v9Control.holdE then
             boulderState="WAIT_INPUT";boulderRetryAt=now+3
         end
@@ -4507,12 +4547,15 @@ local function boulderStep(root,now,dt)
         if now-boulderHoldSince>=boulderHoldDuration then
             boulderReleaseE()
             boulderState="MINING"
-            -- If nothing happens, retry prompt rather than staying stuck indefinitely.
-            boulderRetryAt=now+12
+            -- Fast retry only while no prompt-trigger confirmation was observed.
+            -- Confirmed mining stays uninterrupted while the boulder is present.
+            boulderRetryAt=now+(boulderConfirmed and 45 or 4)
         end
         boulderInfo.Text=string.format("HOLD PROMPT | %.1f / %.1fs",now-boulderHoldSince,boulderHoldDuration)
     else
-        boulderInfo.Text=string.format("%s | Retry in %.0fs | Boulder %.0fs",boulderState,math.max(0,boulderRetryAt-now),now-boulderStarted)
+        boulderInfo.Text=string.format("%s | %s | %.0fs | Attempts %d",boulderState,
+            boulderConfirmed and "E CONFIRMED" or ("Retry "..math.max(0,math.ceil(boulderRetryAt-now)).."s"),
+            now-boulderStarted,boulderAttemptCount)
     end
     return true
 end
