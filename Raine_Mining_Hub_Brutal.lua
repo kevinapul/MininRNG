@@ -3959,7 +3959,7 @@ local hunterHeading=Vector3.new(1,0,0)
 -- Keep scan movement within the current mountain, not free-flying in empty sky.
 local hunterNav={lastRockPos=nil,lastRockAt=0,edgeSince=nil,lastTurn=0,
     probeAt=0,climbRoute=nil,climbDirection=nil,climbRock=false,
-    climbMissingSince=nil,climbBestY=nil,safePos=nil,safeAt=0
+    climbMissingSince=nil,climbBestY=nil,safePos=nil,safeAt=0}
 local HUNTER_SCAN_RADIUS=500
 local HUNTER_LAYER_STEP=100
 local HUNTER_EMPTY_SECONDS=30
